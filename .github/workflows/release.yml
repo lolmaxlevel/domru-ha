@@ -9,8 +9,17 @@ permissions:
   contents: write
 
 jobs:
+  check-quality:
+    name: Check Code Quality
+    uses: ./.github/workflows/lint.yml
+
+  check-validate:
+    name: Check Validation
+    uses: ./.github/workflows/validate.yml
+
   release:
     name: Create Release
+    needs: [check-quality, check-validate]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repository
