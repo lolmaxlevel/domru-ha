@@ -143,5 +143,3 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                 },
             ),
         )
-
-
