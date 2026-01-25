@@ -9,6 +9,7 @@ from homeassistant.components.event import EventDeviceClass, EventEntity
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .coordinator import DomruDataUpdateCoordinator
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 
 
 async def async_setup_entry(
+    hass: HomeAssistant,  # noqa: ARG001
     entry: DomruConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
