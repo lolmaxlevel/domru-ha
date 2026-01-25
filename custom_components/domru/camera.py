@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
@@ -83,6 +84,8 @@ class DomruCamera(DomruEntity, Camera):
         self._attr_name = camera_name
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{camera_id}"
         self._stream_url: str | None = None
+        self._stream_url_time: float | None = None
+        self._stream_url_cache_time: float = 300.0  # Cache for 5 minutes
         # Отключаем автоматическое обновление снимков, используем только стрим
         self._attr_is_streaming = True
 
@@ -103,13 +106,19 @@ class DomruCamera(DomruEntity, Camera):
 
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
-        # Cache stream URL to avoid multiple API calls
-        if not self._stream_url:
+        current_time = time.time()
+        # Check if cache is expired
+        if (
+            not self._stream_url
+            or not self._stream_url_time
+            or (current_time - self._stream_url_time) > self._stream_url_cache_time
+        ):
             try:
                 _LOGGER.debug("Fetching RTSP stream URL for camera %s", self._camera_id)
                 self._stream_url = await self._client.async_get_camera_stream_url(
                     self._camera_id
                 )
+                self._stream_url_time = current_time
                 _LOGGER.info(
                     "Got RTSP stream URL for camera %s: %s",
                     self._camera_id,
