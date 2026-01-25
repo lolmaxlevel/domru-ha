@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from homeassistant.components.event import EventDeviceClass, EventEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .coordinator import DomruDataUpdateCoordinator
     from .data import DomruConfigEntry
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
     entry: DomruConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -35,7 +33,7 @@ class DomruCallEvent(DomruEntity, EventEntity):
     """Dom.ru call event entity."""
 
     _attr_device_class = EventDeviceClass.DOORBELL
-    _attr_event_types = [
+    _attr_event_types: ClassVar[list[str]] = [
         "call_accepted",
         "call_rejected",
         "call_missed",
@@ -76,4 +74,3 @@ class DomruCallEvent(DomruEntity, EventEntity):
             },
         )
         self.async_write_ha_state()
-

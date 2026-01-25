@@ -25,4 +25,5 @@ class DomruEntity(CoordinatorEntity[DomruDataUpdateCoordinator]):
                     coordinator.config_entry.entry_id,
                 ),
             },
+            name="Домофон",
         )

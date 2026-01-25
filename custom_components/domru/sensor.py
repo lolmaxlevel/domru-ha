@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
@@ -90,72 +90,100 @@ class DomruSensor(DomruEntity, SensorEntity):
         super().__init__(coordinator)
         self.entity_description = entity_description
         # Set unique ID for this sensor
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        )
 
     @property
     def native_value(self) -> str | float | datetime | None:
         """Return the native value of the sensor."""
+        key = self.entity_description.key
         data = self.coordinator.data
+
+        # Route to appropriate handler based on key
+        handlers: dict[str, Any] = {
+            "balance": self._get_balance,
+            "amount_sum": self._get_amount_sum,
+            "block_status": self._get_block_status,
+            "target_date": self._get_target_date,
+            "events_count": self._get_events_count,
+            "last_event": self._get_last_event,
+            "place_name": self._get_place_name,
+            "access_control_name": self._get_access_control_name,
+        }
+
+        handler = handlers.get(key)
+        if handler:
+            return handler(data)
+        return None
+
+    def _get_balance(self, data: dict[str, Any]) -> str | float | None:
+        """Get balance value."""
         finances = data.get("finances", {})
+        return finances.get("balance")
 
-        if self.entity_description.key == "balance":
-            return finances.get("balance")
+    def _get_amount_sum(self, data: dict[str, Any]) -> str | float | None:
+        """Get amount sum value."""
+        finances = data.get("finances", {})
+        return finances.get("amountSum")
 
-        if self.entity_description.key == "amount_sum":
-            return finances.get("amountSum")
+    def _get_block_status(self, data: dict[str, Any]) -> str:
+        """Get block status."""
+        finances = data.get("finances", {})
+        block_type = finances.get("blockType", "UNKNOWN")
+        blocked = finances.get("blocked", False)
+        if blocked:
+            return "Заблокирован"
+        if block_type == "NOT_BLOCKED":
+            return "Не заблокирован"
+        return block_type
 
-        if self.entity_description.key == "block_status":
-            block_type = finances.get("blockType", "UNKNOWN")
-            blocked = finances.get("blocked", False)
-            if blocked:
-                return "Заблокирован"
-            if block_type == "NOT_BLOCKED":
-                return "Не заблокирован"
-            return block_type
+    def _get_target_date(self, data: dict[str, Any]) -> datetime | None:
+        """Get target date."""
+        finances = data.get("finances", {})
+        target_date = finances.get("targetDate")
+        if target_date:
+            # Parse ISO 8601 timestamp string to datetime object
+            try:
+                return dt_util.parse_datetime(target_date)
+            except (ValueError, TypeError):
+                return None
+        return None
 
-        if self.entity_description.key == "target_date":
-            target_date = finances.get("targetDate")
-            if target_date:
-                # Parse ISO 8601 timestamp string to datetime object
-                try:
-                    return dt_util.parse_datetime(target_date)
-                except (ValueError, TypeError):
-                    return None
-            return None
-
-        # Events
+    def _get_events_count(self, data: dict[str, Any]) -> int:
+        """Get events count."""
         events = data.get("events", [])
+        return len(events)
 
-        if self.entity_description.key == "events_count":
-            return len(events)
+    def _get_last_event(self, data: dict[str, Any]) -> datetime | None:
+        """Get last event timestamp."""
+        events = data.get("events", [])
+        if events:
+            # Get timestamp from first event (most recent)
+            first_event = events[0]
+            timestamp = first_event.get("timestamp")
 
-        if self.entity_description.key == "last_event":
-            if events:
-                # Get timestamp from first event (most recent)
-                first_event = events[0]
-                timestamp = first_event.get("timestamp")
+            if timestamp:
+                try:
+                    # Convert Unix timestamp string to datetime
+                    return datetime.fromtimestamp(int(timestamp), tz=UTC)
+                except (ValueError, TypeError, OSError):
+                    pass
+        return None
 
-                if timestamp:
-                    try:
-                        # Convert Unix timestamp string to datetime
-                        from datetime import timezone
-                        return datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
-                    except (ValueError, TypeError, OSError):
-                        pass
-            return None
+    def _get_place_name(self, data: dict[str, Any]) -> str | None:
+        """Get place name."""
+        places = data.get("places", [])
+        if places:
+            return places[0].get("name")
+        return None
 
-        # Legacy support
-        if self.entity_description.key == "place_name":
-            places = data.get("places", [])
-            if places:
-                return places[0].get("name")
-            return None
-
-        if self.entity_description.key == "access_control_name":
-            access_controls = data.get("access_controls", [])
-            if access_controls:
-                return access_controls[0].get("name")
-            return None
+    def _get_access_control_name(self, data: dict[str, Any]) -> str | None:
+        """Get access control name."""
+        access_controls = data.get("access_controls", [])
+        if access_controls:
+            return access_controls[0].get("name")
+        return None
 
         return None
 
@@ -166,7 +194,7 @@ class DomruSensor(DomruEntity, SensorEntity):
         finances = data.get("finances", {})
 
         if self.entity_description.key == "balance":
-            # Возвращаем всю информацию о платеже
+            # Возвращаем всю информацию o платеже
             return {
                 "balance": finances.get("balance"),
                 "block_type": finances.get("blockType"),
@@ -209,13 +237,15 @@ class DomruSensor(DomruEntity, SensorEntity):
                 # Используем понятное название если знаем тип, иначе показываем как есть
                 event_type_display = event_type_map.get(event_type, event_type)
 
-                events_list.append({
-                    "type": event_type,
-                    "type_display": event_type_display,
-                    "message": message,
-                    "timestamp": event.get("timestamp"),
-                    "id": event.get("id"),
-                })
+                events_list.append(
+                    {
+                        "type": event_type,
+                        "type_display": event_type_display,
+                        "message": message,
+                        "timestamp": event.get("timestamp"),
+                        "id": event.get("id"),
+                    }
+                )
 
             return {
                 "events": events_list,

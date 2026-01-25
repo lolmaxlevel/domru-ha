@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 import socket as sync_socket
 import uuid
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 _LOGGER = logging.getLogger(__name__)
+
+# Constants
+MAX_AUTH_FAILURES = 2
 
 
 class DomruSipClient:
@@ -53,16 +57,17 @@ class DomruSipClient:
             s = sync_socket.socket(sync_socket.AF_INET, sync_socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
+        except OSError:
+            _LOGGER.exception("Failed to get local IP")
+            return "127.0.0.1"
+        else:
             s.close()
             return local_ip
-        except Exception as err:
-            _LOGGER.error("Failed to get local IP: %s", err)
-            return "127.0.0.1"
 
     @staticmethod
     def _md5(s: str) -> str:
         """Calculate MD5 hash."""
-        return hashlib.md5(s.encode()).hexdigest()
+        return hashlib.md5(s.encode(), usedforsecurity=False).hexdigest()
 
     @staticmethod
     def _tag() -> str:
@@ -86,13 +91,15 @@ class DomruSipClient:
 
         msg = (
             f"REGISTER sip:{self.realm} SIP/2.0\r\n"
-            f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self._tag()};rport\r\n"
+            f"Via: SIP/2.0/UDP {self.local_ip}:{self.local_port};"
+            f"branch=z9hG4bK{self._tag()};rport\r\n"
             f"Max-Forwards: 70\r\n"
             f"From: <sip:{self.username}@{self.realm}>;tag={self._tag()}\r\n"
             f"To: <sip:{self.username}@{self.realm}>\r\n"
             f"Call-ID: {self._call_id}\r\n"
             f"CSeq: {self._cseq} REGISTER\r\n"
-            f"Contact: <sip:{self.username}@{self.local_ip}:{self.local_port};ob>;reg-id=42;expires={expires_value}\r\n"
+            f"Contact: <sip:{self.username}@{self.local_ip}:{self.local_port};ob>;"
+            f"reg-id=42;expires={expires_value}\r\n"
             f"Supported: outbound\r\n"
             f"Allow-Events: message-summary\r\n"
             f"Expires: {expires_value}\r\n"
@@ -193,7 +200,7 @@ class DomruSipClient:
         self._last_nonce = None
 
         # Extract expires
-        import re
+
         exp_match = re.search(r"Expires:\s*(\d+)", message, re.IGNORECASE)
         if exp_match and int(exp_match.group(1)) > 0:
             self._expires = int(exp_match.group(1))
@@ -207,8 +214,6 @@ class DomruSipClient:
 
     def _handle_401_unauthorized(self, message: str) -> None:
         """Handle 401 Unauthorized response."""
-        import re
-
         realm_match = re.search(r'realm="([^"]+)"', message, re.IGNORECASE)
         nonce_match = re.search(r'nonce="([^"]+)"', message, re.IGNORECASE)
 
@@ -225,7 +230,7 @@ class DomruSipClient:
             self._auth_failure = 1
             self._last_nonce = nonce
 
-        if self._auth_failure >= 2:
+        if self._auth_failure >= MAX_AUTH_FAILURES:
             _LOGGER.error("SIP authentication failed - invalid credentials")
             return
 
@@ -246,19 +251,20 @@ class DomruSipClient:
 
         # Notify about incoming call
         if self.on_call_callback:
-            self.on_call_callback({
-                "event": "incoming_call",
-                "from": headers.get("from"),
-                "to": headers.get("to"),
-                "call_id": headers.get("call_id"),
-            })
+            self.on_call_callback(
+                {
+                    "event": "incoming_call",
+                    "from": headers.get("from"),
+                    "to": headers.get("to"),
+                    "call_id": headers.get("call_id"),
+                }
+            )
 
         # Send responses: 100 Trying, 180 Ringing, 486 Busy Here
         self._send_invite_responses(message, addr)
 
     def _extract_headers(self, message: str) -> dict[str, str]:
         """Extract common SIP headers."""
-        import re
 
         def extract_header(name: str, short: str | None = None) -> str | None:
             pattern = f"^({name}"
@@ -380,7 +386,7 @@ class SipProtocol(asyncio.DatagramProtocol):
         """Initialize protocol."""
         self.sip_client = sip_client
 
-    def connection_made(self, transport: asyncio.DatagramTransport) -> None:
+    def connection_made(self, _transport: asyncio.DatagramTransport) -> None:
         """Handle connection made."""
         _LOGGER.debug("SIP connection established")
 
@@ -396,4 +402,3 @@ class SipProtocol(asyncio.DatagramProtocol):
         """Handle connection lost."""
         if exc:
             _LOGGER.error("SIP connection lost: %s", exc)
-

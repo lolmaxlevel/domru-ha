@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
-from datetime import datetime, timezone
+import logging
+from datetime import UTC, datetime
 from json.decoder import JSONDecodeError
 from typing import Any
 from urllib.parse import urljoin
@@ -13,6 +13,8 @@ from urllib.parse import urljoin
 import aiohttp
 import async_timeout
 from aiohttp.client_exceptions import ClientConnectorError, ContentTypeError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DomruApiClientError(Exception):
@@ -36,7 +38,18 @@ class DomruApiClient:
 
     BASE_URL = "https://myhome.proptech.ru/"
     # Full User-Agent from go-impl/pkg/domru/helpers/upstream_request.go
-    USER_AGENT = "Google sdkgphone64x8664 | Android 14 | erth | 8.9.2 (8090200) |  | null | 10c99d90-9899-4a25-926f-067b34bc4a7f | null"
+    USER_AGENT = (
+        "Google sdkgphone64x8664 | Android 14 | erth | 8.9.2 (8090200) |  | "
+        "null | 10c99d90-9899-4a25-926f-067b34bc4a7f | null"
+    )
+    # HTTP status codes
+    HTTP_UNAUTHORIZED = 401
+    HTTP_FORBIDDEN = 403
+    HTTP_INTERNAL_ERROR = 500
+    HTTP_OK = 200
+    HTTP_CREATED = 201
+    # Error codes
+    ERROR_TEMPORARY_CODE_FAILED = 6005
 
     def __init__(
         self,
@@ -55,23 +68,23 @@ class DomruApiClient:
         self._access_control_id: str | None = None
         # Hash parameters from go-impl/pkg/auth/password.go
         self._hash2_prefix = "DigitalHomeNTK"
-        self._secret = "789sdgHJs678wertv34712376"
-
+        self._secret = "789sdgHJs678wertv34712376"  # noqa: S105
 
     def _get_hash1(self) -> str:
         """Generate hash1 (SHA1 of password in base64)."""
         password_bytes = self._password.encode("iso-8859-1")
-        sha1_digest = hashlib.sha1(password_bytes).digest()
-        hash1 = base64.b64encode(sha1_digest).decode("utf-8")
-        return hash1
+        sha1_digest = hashlib.sha1(password_bytes).digest()  # noqa: S324
+        return base64.b64encode(sha1_digest).decode("utf-8")
 
     def _get_hash2(self, timestamp: datetime) -> str:
         """Generate hash2 (MD5 of combined string)."""
         timestamp_str = timestamp.strftime("%Y%m%d%H%M%S")
         # From go-impl/pkg/auth/password.go
-        combined = f"{self._hash2_prefix}password{self._username}{self._password}{timestamp_str}{self._secret}"
-        hash2 = hashlib.md5(combined.encode("utf-8")).hexdigest()
-        return hash2
+        combined = (
+            f"{self._hash2_prefix}password{self._username}{self._password}"
+            f"{timestamp_str}{self._secret}"
+        )
+        return hashlib.md5(combined.encode("utf-8")).hexdigest()  # noqa: S324
 
     async def async_authenticate(self) -> None:
         """Authenticate with the API using login and password."""
@@ -83,13 +96,17 @@ class DomruApiClient:
             # Try to refresh token first
             try:
                 await self._refresh_access_token()
+            except (
+                DomruApiClientError,
+                DomruApiClientCommunicationError,
+            ):  # pylint: disable=broad-except
+                _LOGGER.debug("Failed to refresh access token")
+            else:
                 return
-            except Exception:  # pylint: disable=broad-except
-                pass
 
         # Authenticate with login and password
         if self._username is not None and self._password is not None:
-            timestamp = datetime.now(timezone.utc)
+            timestamp = datetime.now(UTC)
             url = urljoin(self.BASE_URL, f"auth/v2/auth/{self._username}/password")
             json_data = {
                 "login": str(self._username),
@@ -160,7 +177,11 @@ class DomruApiClient:
             # Parse places according to Go model structure
             # Response: {"data": [{"place": {...}, ...}]}
             if places_response:
-                first_place_data = places_response[0] if isinstance(places_response, list) else places_response
+                first_place_data = (
+                    places_response[0]
+                    if isinstance(places_response, list)
+                    else places_response
+                )
 
                 # Extract place object from the response
                 if isinstance(first_place_data, dict):
@@ -176,29 +197,45 @@ class DomruApiClient:
                     if access_controls and len(access_controls) > 0:
                         device = access_controls[0]
                         self._access_control_id = device.get("id")
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+            TimeoutError,
+        ):  # pylint: disable=broad-except
+            _LOGGER.debug("Failed to get subscriber places")
 
         # Get cameras
         try:
             cameras = await self.get_cameras()
             data["cameras"] = cameras
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+            TimeoutError,
+        ):  # pylint: disable=broad-except
+            _LOGGER.debug("Failed to get cameras")
 
         # Get finances
         try:
             finances = await self.get_finances()
             data["finances"] = finances
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+            TimeoutError,
+        ):  # pylint: disable=broad-except
+            _LOGGER.debug("Failed to get finances")
 
         # Get events (if we have place_id)
         if self._place_id:
             try:
                 events = await self.async_get_events(self._place_id, limit=20)
                 data["events"] = events
-            except Exception:  # pylint: disable=broad-except
+            except (
+                DomruApiClientError,
+                DomruApiClientCommunicationError,
+                TimeoutError,
+            ):  # pylint: disable=broad-except
                 pass
 
         return data
@@ -211,12 +248,13 @@ class DomruApiClient:
         # Handle different response formats
         # Response: {"data": [{"place": {...}, ...}]}
         if isinstance(result, dict):
-            places = result.get("data", result.get("subscriberPlaces", result.get("places", [])))
+            places = result.get(
+                "data", result.get("subscriberPlaces", result.get("places", []))
+            )
         else:
             places = result if isinstance(result, list) else []
 
         return places if isinstance(places, list) else []
-
 
     async def get_cameras(self) -> list[dict[str, Any]]:
         """Get cameras list."""
@@ -236,21 +274,31 @@ class DomruApiClient:
         url = urljoin(self.BASE_URL, "rest/v1/subscribers/profiles/finances")
         result = await self._api_wrapper(url=url, method="GET")
 
-        # Response format: {"balance": 0.0, "blockType": "NOT_BLOCKED", "amountSum": 150.0, ...}
+        # Response format: {"balance": 0.0, "blockType": "NOT_BLOCKED",
+        # "amountSum": 150.0, ...}
         if isinstance(result, dict):
             return result
         return {}
 
-    async def async_open_door(self, access_control_id: str | int | None = None, place_id: str | int | None = None) -> dict[str, Any]:
+    async def async_open_door(
+        self,
+        access_control_id: str | int | None = None,
+        place_id: str | int | None = None,
+    ) -> dict[str, Any]:
         """Open the door."""
         device_id = access_control_id or self._access_control_id
         place = place_id or self._place_id
 
         if not device_id or not place:
-            msg = f"Device ID or Place ID not set (device_id={device_id}, place_id={place})"
+            msg = (
+                f"Device ID or Place ID not set (device_id={device_id}, "
+                f"place_id={place})"
+            )
             raise DomruApiClientError(msg)
 
-        url = urljoin(self.BASE_URL, f"rest/v1/places/{place}/accesscontrols/{device_id}/actions")
+        url = urljoin(
+            self.BASE_URL, f"rest/v1/places/{place}/accesscontrols/{device_id}/actions"
+        )
         json_data = {"name": "accessControlOpen"}
 
         result = await self._api_wrapper(
@@ -264,13 +312,15 @@ class DomruApiClient:
         """Get camera snapshot."""
         try:
             async with async_timeout.timeout(10):
-                url = urljoin(self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/snapshots")
+                url = urljoin(
+                    self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/snapshots"
+                )
                 response = await self._session.request(
                     method="GET",
                     url=url,
                     headers=self._get_headers(),
                 )
-                if response.status == 401:
+                if response.status == self.HTTP_UNAUTHORIZED:
                     await self._set_access_token()
                     response = await self._session.request(
                         method="GET",
@@ -279,7 +329,7 @@ class DomruApiClient:
                     )
                 response.raise_for_status()
                 return await response.read()
-        except asyncio.TimeoutError as exception:
+        except TimeoutError as exception:
             msg = f"Timeout fetching snapshot - {exception}"
             raise DomruApiClientCommunicationError(msg) from exception
         except aiohttp.ClientError as exception:
@@ -288,15 +338,23 @@ class DomruApiClient:
 
     async def async_get_camera_stream_url(self, camera_id: str | int) -> str:
         """Get camera stream URL (RTSP format)."""
-        url = urljoin(self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/video?LightStream=0")
+        url = urljoin(
+            self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/video?LightStream=0"
+        )
         response = await self._api_wrapper(
             url=url,
             method="GET",
         )
 
-        # Parse VideoResponse structure from go-impl/pkg/domru/models/cameras.go
-        # Response: {"data": {"URL": "...", "Error": "...", "ErrorCode": "...", "Status": "..."}}
-        if isinstance(response, dict) and "data" in response and isinstance(response["data"], dict):
+        # Parse VideoResponse structure from
+        # go-impl/pkg/domru/models/cameras.go
+        # Response: {"data": {"URL": "...", "Error": "...", "ErrorCode": "...",
+        # "Status": "..."}}
+        if (
+            isinstance(response, dict)
+            and "data" in response
+            and isinstance(response["data"], dict)
+        ):
             video_data = response["data"]
 
             # Check for error in response
@@ -310,12 +368,14 @@ class DomruApiClient:
             url_value = video_data.get("URL", "")
 
             # Validate and fix URL if needed
+            if (
+                url_value
+                and not url_value.startswith("rtsp://")
+                and "://" not in url_value
+            ):
+                url_value = "rtsp://" + url_value
+
             if url_value:
-                # Check if URL starts with rtsp://
-                if not url_value.startswith("rtsp://"):
-                    # Try to fix if it looks like domain without protocol
-                    if "://" not in url_value:
-                        url_value = "rtsp://" + url_value
                 return url_value
 
         # Fallback for different response formats
@@ -339,8 +399,14 @@ class DomruApiClient:
                 return {"login": "", "password": "", "realm": ""}
 
             # Extract place from response
-            first_place_data = places_data[0] if isinstance(places_data, list) else places_data
-            place = first_place_data.get("place", first_place_data) if isinstance(first_place_data, dict) else {}
+            first_place_data = (
+                places_data[0] if isinstance(places_data, list) else places_data
+            )
+            place = (
+                first_place_data.get("place", first_place_data)
+                if isinstance(first_place_data, dict)
+                else {}
+            )
 
             # Try to find sipdevices URL
             # The URL is typically in format: https://myhome.proptech.ru/rest/v1/places/{placeId}/accesscontrols/{deviceId}/sipdevices
@@ -360,7 +426,7 @@ class DomruApiClient:
             # Build sipdevices URL
             url = urljoin(
                 self.BASE_URL,
-                f"rest/v1/places/{place_id}/accesscontrols/{device_id}/sipdevices"
+                f"rest/v1/places/{place_id}/accesscontrols/{device_id}/sipdevices",
             )
 
             json_data = {"installationId": installation_id}
@@ -371,7 +437,8 @@ class DomruApiClient:
                 json=json_data,
             )
 
-            # Response format: {"data": {"login": "...", "password": "...", "realm": "..."}}
+            # Response format: {"data": {"login": "...", "password": "...",
+            # "realm": "..."}}
             if isinstance(result, dict):
                 data = result.get("data", result)
                 return {
@@ -379,21 +446,21 @@ class DomruApiClient:
                     "password": data.get("password", ""),
                     "realm": data.get("realm", ""),
                 }
-
             return {"login": "", "password": "", "realm": ""}
 
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception:  # pylint: disable=broad-except
             # Log error but don't fail setup
-            import logging
-            logging.getLogger(__name__).error("Failed to get SIP credentials: %s", e)
+            _LOGGER.exception("Failed to get SIP credentials")
             return {"login": "", "password": "", "realm": ""}
 
-    async def async_get_events(self, place_id: str | int, limit: int = 50) -> list[dict[str, Any]]:
+    async def async_get_events(
+        self, place_id: str | int, limit: int = 50
+    ) -> list[dict[str, Any]]:
         """Get events history for a place."""
         try:
             url = urljoin(
                 self.BASE_URL,
-                f"rest/v1/places/{place_id}/events?allowExtentedActions=true"
+                f"rest/v1/places/{place_id}/events?allowExtentedActions=true",
             )
 
             result = await self._api_wrapper(
@@ -415,9 +482,12 @@ class DomruApiClient:
 
             return events if isinstance(events, list) else []
 
-        except Exception as e:  # pylint: disable=broad-except
-            import logging
-            logging.getLogger(__name__).warning("Failed to get events: %s", e)
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+            TimeoutError,
+        ):  # pylint: disable=broad-except
+            _LOGGER.warning("Failed to get events")
             return []
 
     def _get_headers(self) -> dict[str, str]:
@@ -432,11 +502,31 @@ class DomruApiClient:
         if self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
 
-
         if self._operator_id:
             headers["Operator"] = str(self._operator_id)
 
         return headers
+
+    def _handle_forbidden_error(self, json_response: Any) -> None:
+        """Handle 403 Forbidden error."""
+        msg = json_response if isinstance(json_response, str) else "Forbidden"
+        raise DomruApiClientAuthenticationError(msg)
+
+    def _handle_server_error(self, json_response: Any) -> None:
+        """Handle 500 Server error."""
+        error_code = (
+            json_response.get("errorCode") if isinstance(json_response, dict) else None
+        )
+        if error_code == self.ERROR_TEMPORARY_CODE_FAILED:
+            msg = "Temporary code failed"
+            raise DomruApiClientError(msg)
+        msg = json_response if isinstance(json_response, str) else "Server error"
+        raise DomruApiClientError(msg)
+
+    def _handle_http_error(self, json_response: Any, status: int) -> None:
+        """Handle other HTTP errors."""
+        msg = json_response if isinstance(json_response, str) else f"HTTP {status}"
+        raise DomruApiClientError(msg)
 
     async def _api_wrapper(
         self,
@@ -444,13 +534,16 @@ class DomruApiClient:
         url: str,
         json: dict | None = None,
         headers: dict | None = None,
+        *,
         authenticated: bool = True,
     ) -> Any:
         """Make an API request with automatic token refresh on 401."""
         while True:
             try:
                 headers_to_use = headers or (
-                    self._get_headers() if authenticated else {
+                    self._get_headers()
+                    if authenticated
+                    else {
                         "User-Agent": self.USER_AGENT,
                         "Content-Type": "application/json; charset=UTF-8",
                     }
@@ -465,51 +558,56 @@ class DomruApiClient:
                     )
 
                     # Handle 401 - try to refresh token and retry
-                    if response.status == 401 and authenticated:
-                        try:
-                            await self._set_access_token()
-                            continue  # Retry the request with new token
-                        except DomruApiClientAuthenticationError:
-                            raise
+                    if response.status == self.HTTP_UNAUTHORIZED and authenticated:
+                        await self._set_access_token()
+                        continue  # Retry the request with new token
 
                     # Try to parse response
                     try:
                         json_response = await response.json()
                     except (JSONDecodeError, ContentTypeError) as e:
-                        raw_response = await response.text()
-                        msg = f"Failed to parse response: {response.status} {response.reason}"
+                        msg = (
+                            "Failed to parse response: "
+                            f"{response.status} {response.reason}"
+                        )
                         raise DomruApiClientError(msg) from e
 
                     # Check for error responses
-                    if response.status == 403:
-                        msg = json_response if isinstance(json_response, str) else "Forbidden"
-                        raise DomruApiClientAuthenticationError(msg)
+                    if response.status == self.HTTP_FORBIDDEN:
+                        self._handle_forbidden_error(json_response)
 
-                    if response.status == 500:
-                        error_code = (json_response.get("errorCode")
-                                     if isinstance(json_response, dict) else None)
-                        if error_code == 6005:
-                            msg = "Temporary code failed"
-                            raise DomruApiClientError(msg)
-                        msg = json_response if isinstance(json_response, str) else "Server error"
-                        raise DomruApiClientError(msg)
+                    if response.status == self.HTTP_INTERNAL_ERROR:
+                        self._handle_server_error(json_response)
 
-                    if response.status not in (200, 201):
-                        msg = json_response if isinstance(json_response, str) else f"HTTP {response.status}"
-                        raise DomruApiClientError(msg)
+                    if response.status not in (self.HTTP_OK, self.HTTP_CREATED):
+                        self._handle_http_error(json_response, response.status)
 
                     return json_response
 
-            except asyncio.TimeoutError as exception:
+            except TimeoutError as exception:
                 msg = f"Timeout error - {exception}"
                 raise DomruApiClientCommunicationError(msg) from exception
             except ClientConnectorError as exception:
                 msg = f"Client connector error - {exception}"
                 raise DomruApiClientCommunicationError(msg) from exception
-            except (DomruApiClientAuthenticationError, DomruApiClientCommunicationError):
+            except (
+                DomruApiClientAuthenticationError,
+                DomruApiClientCommunicationError,
+            ):
                 raise
             except DomruApiClientError:
                 raise
             except Exception as exception:  # pylint: disable=broad-except
                 msg = f"Unexpected error - {exception}"
                 raise DomruApiClientError(msg) from exception
+
+    def set_ids(
+        self,
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
+    ) -> None:
+        """Set place_id and access_control_id."""
+        if place_id is not None:
+            self._place_id = place_id
+        if access_control_id is not None:
+            self._access_control_id = access_control_id

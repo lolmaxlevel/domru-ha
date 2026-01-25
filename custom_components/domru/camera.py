@@ -6,13 +6,13 @@ import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .api import DomruApiClient
     from .coordinator import DomruDataUpdateCoordinator
     from .data import DomruConfigEntry
 
@@ -20,7 +20,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
     entry: DomruConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -37,7 +36,10 @@ async def async_setup_entry(
     for camera_data in cameras_data:
         # Support both formats: Go model (ID, Name) and old format (id, name)
         camera_id = camera_data.get("ID") or camera_data.get("id")
-        camera_name = camera_data.get("Name") or camera_data.get("name") or f"Camera {camera_id}"
+        camera_name = (
+            camera_data.get("Name") or camera_data.get("name") or f"Camera {camera_id}"
+        )
+        has_sound = camera_data.get("IsSound") == 1  # Check if camera has audio
 
         if camera_id:  # Only add if we have an ID
             entities.append(
@@ -46,6 +48,8 @@ async def async_setup_entry(
                     client=entry.runtime_data.client,
                     camera_id=camera_id,
                     camera_name=camera_name,
+                    camera_data=camera_data,
+                    has_sound=has_sound,
                 )
             )
 
@@ -61,33 +65,60 @@ class DomruCamera(DomruEntity, Camera):
     def __init__(
         self,
         coordinator: DomruDataUpdateCoordinator,
-        client,
+        client: DomruApiClient,
         camera_id: str | int,
         camera_name: str,
+        camera_data: dict,
+        *,
+        has_sound: bool = False,
     ) -> None:
         """Initialize the camera class."""
         super().__init__(coordinator)
-        Camera.__init__(self)
         self._client = client
         self._camera_id = camera_id
+        self._camera_data = camera_data
+        self._has_sound = has_sound
         self._attr_name = camera_name
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{camera_id}"
         self._stream_url: str | None = None
         # Отключаем автоматическое обновление снимков, используем только стрим
         self._attr_is_streaming = True
 
+        stream_opts: dict[str, str | bool | float] = {
+            "rtsp_transport": "tcp",  # Используем TCP для стабильности
+        }
+
+        if has_sound:
+            # Явно указываем что нужно обрабатывать аудио дорожку
+            stream_opts["audio_codec"] = "copy"  # Копировать аудио без перекодирования
+            _LOGGER.info("Audio enabled in stream options for camera %s", camera_id)
+
+        # Устанавливаем stream_options перед Camera.__init__
+        self.stream_options = stream_opts
+
+        # Теперь вызываем Camera.__init__ который не перезапишет stream_options
+        Camera.__init__(self)
+
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
-        try:
-            # Cache stream URL to avoid multiple API calls
-            if not self._stream_url:
+        # Cache stream URL to avoid multiple API calls
+        if not self._stream_url:
+            try:
                 _LOGGER.debug("Fetching RTSP stream URL for camera %s", self._camera_id)
-                self._stream_url = await self._client.async_get_camera_stream_url(self._camera_id)
-                _LOGGER.info("Got RTSP stream URL for camera %s: %s", self._camera_id, self._stream_url)
-            return self._stream_url
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.error("Error getting stream URL for camera %s: %s", self._camera_id, err)
-            return None
+                self._stream_url = await self._client.async_get_camera_stream_url(
+                    self._camera_id
+                )
+                _LOGGER.info(
+                    "Got RTSP stream URL for camera %s: %s",
+                    self._camera_id,
+                    self._stream_url,
+                )
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception(
+                    "Error getting stream URL for camera %s", self._camera_id
+                )
+                return None
+        return self._stream_url
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -95,10 +126,24 @@ class DomruCamera(DomruEntity, Camera):
         """Return bytes of camera image."""
         # Этот метод используется как fallback если стрим недоступен
         # или для получения thumbnail в UI
+        _ = width, height  # Unused parameters
         try:
             _LOGGER.debug("Fetching snapshot for camera %s", self._camera_id)
             return await self._client.async_get_camera_snapshot(self._camera_id)
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.error("Error getting snapshot for camera %s: %s", self._camera_id, err)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Error getting snapshot for camera %s", self._camera_id)
             return None
 
+    @property
+    def extra_state_attributes(self) -> dict[str, str | int | bool]:
+        """Return extra state attributes."""
+        return {
+            "camera_id": self._camera_id,
+            "has_sound": self._camera_data.get("IsSound") == 1,
+            "is_active": self._camera_data.get("IsActive") == 1,
+            "state": "online" if self._camera_data.get("State") == 1 else "offline",
+            "motion_detector": self._camera_data.get("MotionDetectorMode"),
+            "record_type": self._camera_data.get("RecordType"),
+            "quota_seconds": self._camera_data.get("Quota"),
+            "timezone": self._camera_data.get("TimeZone"),
+        }

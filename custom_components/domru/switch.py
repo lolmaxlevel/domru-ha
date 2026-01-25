@@ -14,11 +14,10 @@ if TYPE_CHECKING:
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001 Unused function argument: `hass`
-    entry: DomruConfigEntry,  # noqa: ARG001 Unused function argument: `entry`
-    async_add_entities: AddEntitiesCallback,  # noqa: ARG001 Unused function argument: `async_add_entities`
+    hass: HomeAssistant,
+    entry: DomruConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the switch platform."""
     # Currently no switches are implemented
     # This can be extended in the future with door lock states
-    pass

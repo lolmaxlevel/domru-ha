@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Simple API integration test - tests API endpoints without Home Assistant.
+"""
+Simple API integration test - tests API endpoints without Home Assistant.
 
 Based on Go implementation from go-impl/
 Using endpoints and models from:
@@ -14,9 +15,9 @@ import base64
 import hashlib
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import aiohttp
 
@@ -31,7 +32,9 @@ API_CAMERAS = "{base_url}/rest/v1/forpost/cameras"
 API_SUBSCRIBER_PLACES = "{base_url}/rest/v1/subscriberplaces"
 API_CAMERA_GET_STREAM = "{base_url}/rest/v1/forpost/cameras/{camera_id}/video"
 API_VIDEO_SNAPSHOT = "{base_url}/rest/v1/places/{place_id}/accesscontrols/{access_control_id}/videosnapshots"
-API_OPEN_DOOR = "{base_url}/rest/v1/places/{place_id}/accesscontrols/{access_control_id}/actions"
+API_OPEN_DOOR = (
+    "{base_url}/rest/v1/places/{place_id}/accesscontrols/{access_control_id}/actions"
+)
 API_FINANCES = "{base_url}/rest/v1/subscribers/profiles/finances"
 API_SUBSCRIBER_PROFILE = "{base_url}/rest/v1/subscribers/profiles"
 
@@ -42,10 +45,10 @@ class DomruAPIClient:
     def __init__(self, login: str, password: str):
         self.login = login
         self.password = password
-        self.access_token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
-        self.operator_id: Optional[int] = None
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.access_token: str | None = None
+        self.refresh_token: str | None = None
+        self.operator_id: int | None = None
+        self.session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -60,7 +63,7 @@ class DomruAPIClient:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    def _get_headers(self, include_auth: bool = False) -> Dict[str, str]:
+    def _get_headers(self, include_auth: bool = False) -> dict[str, str]:
         """Get headers based on antiblock_client implementation."""
         headers = {
             "User-Agent": USER_AGENT,
@@ -72,29 +75,29 @@ class DomruAPIClient:
             headers["Authorization"] = f"Bearer {self.access_token}"
         return headers
 
-    async def authenticate(self) -> Dict[str, Any]:
+    async def authenticate(self) -> dict[str, Any]:
         """Authenticate using password (from go-impl/pkg/auth/password.go)."""
         print(f"\n[AUTH] Authenticating user: {self.login}")
 
         # Generate auth request body
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         earth_timestamp = now.strftime("%Y%m%d%H%M%S")
 
         # hash1: SHA1 of password, base64 encoded
-        hash1 = base64.b64encode(
-            hashlib.sha1(self.password.encode()).digest()
-        ).decode()
+        hash1 = base64.b64encode(hashlib.sha1(self.password.encode()).digest()).decode()
 
         # hash2: MD5 of concatenated strings
-        hash2_input = "".join([
-            "DigitalHomeNTK",
-            "password",
-            self.login,
-            self.password,
-            earth_timestamp,
-            "789sdgHJs678wertv34712376"
-        ])
+        hash2_input = "".join(
+            [
+                "DigitalHomeNTK",
+                "password",
+                self.login,
+                self.password,
+                earth_timestamp,
+                "789sdgHJs678wertv34712376",
+            ]
+        )
         hash2 = hashlib.md5(hash2_input.encode()).hexdigest()
 
         body = {
@@ -122,14 +125,14 @@ class DomruAPIClient:
             self.refresh_token = data.get("refreshToken")
             self.operator_id = data.get("operatorId")
 
-            print(f"✓ Authentication successful!")
+            print("✓ Authentication successful!")
             print(f"  Operator ID: {self.operator_id}")
             print(f"  Access Token: {self.access_token[:20]}...")
             print(f"  Refresh Token: {self.refresh_token[:20]}...")
 
             return data
 
-    async def get_cameras(self) -> Dict[str, Any]:
+    async def get_cameras(self) -> dict[str, Any]:
         url = API_CAMERAS.format(base_url=BASE_URL)
 
         async with self.session.get(
@@ -139,7 +142,7 @@ class DomruAPIClient:
             resp.raise_for_status()
             return await resp.json()
 
-    async def get_places(self) -> Dict[str, Any]:
+    async def get_places(self) -> dict[str, Any]:
         url = API_SUBSCRIBER_PLACES.format(base_url=BASE_URL)
 
         async with self.session.get(
@@ -160,7 +163,7 @@ class DomruAPIClient:
             resp.raise_for_status()
             data = await resp.json()
 
-            print(f"  DEBUG: Full API response:")
+            print("  DEBUG: Full API response:")
             print(f"  {json.dumps(data, indent=4, ensure_ascii=False)}")
 
             # Parse VideoResponse structure
@@ -170,8 +173,8 @@ class DomruAPIClient:
 
                 # Check for error in response
                 if video_data.get("Error"):
-                    error_msg = video_data.get('Error')
-                    error_code = video_data.get('ErrorCode')
+                    error_msg = video_data.get("Error")
+                    error_code = video_data.get("ErrorCode")
                     raise Exception(f"API Error: {error_msg} (Code: {error_code})")
 
                 # Get URL - it should be RTSP URL
@@ -187,25 +190,22 @@ class DomruAPIClient:
                             url_value = "rtsp://" + url_value
                             print(f"  Fixed URL: {url_value}")
                     return url_value
-                else:
-                    print(f"  Warning: Empty URL in response")
-                    return ""
+                print("  Warning: Empty URL in response")
+                return ""
 
             # Fallback for different response formats
             if "url" in data:
                 return data["url"]
-            elif "hlsUrl" in data:
+            if "hlsUrl" in data:
                 return data["hlsUrl"]
 
-            print(f"  Warning: Unexpected response format")
+            print("  Warning: Unexpected response format")
             return ""
 
     async def get_snapshot(self, place_id: int, access_control_id: int) -> bytes:
         """Get video snapshot from access control."""
         url = API_VIDEO_SNAPSHOT.format(
-            base_url=BASE_URL,
-            place_id=place_id,
-            access_control_id=access_control_id
+            base_url=BASE_URL, place_id=place_id, access_control_id=access_control_id
         )
 
         async with self.session.get(
@@ -215,12 +215,10 @@ class DomruAPIClient:
             resp.raise_for_status()
             return await resp.read()
 
-    async def open_door(self, place_id: int, access_control_id: int) -> Dict[str, Any]:
+    async def open_door(self, place_id: int, access_control_id: int) -> dict[str, Any]:
         """Open door via access control."""
         url = API_OPEN_DOOR.format(
-            base_url=BASE_URL,
-            place_id=place_id,
-            access_control_id=access_control_id
+            base_url=BASE_URL, place_id=place_id, access_control_id=access_control_id
         )
 
         # Send accessControlOpen action
@@ -236,7 +234,7 @@ class DomruAPIClient:
             # Return data field if exists, otherwise full response
             return data.get("data", data)
 
-    async def get_finances(self) -> Dict[str, Any]:
+    async def get_finances(self) -> dict[str, Any]:
         """Get subscriber finances."""
         url = API_FINANCES.format(base_url=BASE_URL)
 
@@ -247,7 +245,7 @@ class DomruAPIClient:
             resp.raise_for_status()
             return await resp.json()
 
-    async def get_profile(self) -> Dict[str, Any]:
+    async def get_profile(self) -> dict[str, Any]:
         """Get subscriber profile."""
         url = API_SUBSCRIBER_PROFILE.format(base_url=BASE_URL)
 
@@ -261,7 +259,6 @@ class DomruAPIClient:
 
 async def test_api_flow():
     """Test the API flow by calling each endpoint."""
-
     print("\n" + "=" * 80)
     print("🔌 DOM.RU API INTEGRATION TEST (Go Implementation)")
     print("=" * 80)
@@ -284,15 +281,18 @@ async def test_api_flow():
 
         # Test 1: Authentication
         print("\n[TEST 1] Testing authentication...")
-        print(f"  Endpoint: POST {API_AUTH_PASSWORD.format(base_url='BASE_URL', login='{username}')}")
+        print(
+            f"  Endpoint: POST {API_AUTH_PASSWORD.format(base_url='BASE_URL', login='{username}')}"
+        )
         try:
             auth_response = await client.authenticate()
             print("✓ Authentication successful!")
-            print(f"  Full response:")
+            print("  Full response:")
             print(f"  {json.dumps(auth_response, indent=4, ensure_ascii=False)}")
         except Exception as e:
             print(f"✗ Authentication failed: {e}")
             import traceback
+
             traceback.print_exc()
             return
 
@@ -301,8 +301,8 @@ async def test_api_flow():
         print(f"  Endpoint: GET {API_SUBSCRIBER_PLACES.format(base_url='BASE_URL')}")
         try:
             places_response = await client.get_places()
-            print(f"✓ Retrieved places successfully")
-            print(f"  Response:")
+            print("✓ Retrieved places successfully")
+            print("  Response:")
             print(f"  {json.dumps(places_response, indent=4, ensure_ascii=False)}")
 
             # Extract place info from Go model structure
@@ -318,7 +318,7 @@ async def test_api_flow():
             address = place.get("address", {}).get("visibleAddress", "Unknown")
             access_controls = place.get("accessControls", [])
 
-            print(f"\n  Using place:")
+            print("\n  Using place:")
             print(f"    ID: {place_id}")
             print(f"    Address: {address}")
             print(f"    Access Controls: {len(access_controls)}")
@@ -329,7 +329,7 @@ async def test_api_flow():
                 access_control_id = ac.get("id")
                 ac_name = ac.get("name", "Unknown")
                 ac_allow_open = ac.get("allowOpen", False)
-                print(f"    First Access Control:")
+                print("    First Access Control:")
                 print(f"      ID: {access_control_id}")
                 print(f"      Name: {ac_name}")
                 print(f"      Allow Open: {ac_allow_open}")
@@ -337,6 +337,7 @@ async def test_api_flow():
         except Exception as e:
             print(f"✗ Failed to get places: {e}")
             import traceback
+
             traceback.print_exc()
             return
 
@@ -345,8 +346,8 @@ async def test_api_flow():
         print(f"  Endpoint: GET {API_CAMERAS.format(base_url='BASE_URL')}")
         try:
             cameras_response = await client.get_cameras()
-            print(f"✓ Retrieved cameras successfully")
-            print(f"  Response:")
+            print("✓ Retrieved cameras successfully")
+            print("  Response:")
             print(f"  {json.dumps(cameras_response, indent=4, ensure_ascii=False)}")
 
             cameras = cameras_response.get("data", [])
@@ -356,7 +357,7 @@ async def test_api_flow():
                 camera_id = camera.get("ID")
                 camera_name = camera.get("Name", "Unknown")
                 camera_active = camera.get("IsActive", 0)
-                print(f"\n  First Camera:")
+                print("\n  First Camera:")
                 print(f"    ID: {camera_id}")
                 print(f"    Name: {camera_name}")
                 print(f"    Active: {camera_active}")
@@ -364,6 +365,7 @@ async def test_api_flow():
         except Exception as e:
             print(f"✗ Failed to get cameras: {e}")
             import traceback
+
             traceback.print_exc()
             camera_id = None
 
@@ -372,12 +374,13 @@ async def test_api_flow():
         print(f"  Endpoint: GET {API_FINANCES.format(base_url='BASE_URL')}")
         try:
             finances = await client.get_finances()
-            print(f"✓ Retrieved finances successfully")
-            print(f"  Response:")
+            print("✓ Retrieved finances successfully")
+            print("  Response:")
             print(f"  {json.dumps(finances, indent=4, ensure_ascii=False)}")
         except Exception as e:
             print(f"✗ Failed to get finances: {e}")
             import traceback
+
             traceback.print_exc()
 
         # Test 5: Get subscriber profile
@@ -385,50 +388,65 @@ async def test_api_flow():
         print(f"  Endpoint: GET {API_SUBSCRIBER_PROFILE.format(base_url='BASE_URL')}")
         try:
             profile = await client.get_profile()
-            print(f"✓ Retrieved profile successfully")
-            print(f"  Response:")
+            print("✓ Retrieved profile successfully")
+            print("  Response:")
             print(f"  {json.dumps(profile, indent=4, ensure_ascii=False)}")
         except Exception as e:
             print(f"✗ Failed to get profile: {e}")
             import traceback
+
             traceback.print_exc()
 
         # Test 6: Get camera stream URL (if cameras available)
         if camera_id:
-            print(f"\n[TEST 6] Testing camera stream URL...")
-            print(f"  Endpoint: GET {API_CAMERA_GET_STREAM.format(base_url='BASE_URL', camera_id='{camera_id}')}")
+            print("\n[TEST 6] Testing camera stream URL...")
+            print(
+                f"  Endpoint: GET {API_CAMERA_GET_STREAM.format(base_url='BASE_URL', camera_id='{camera_id}')}"
+            )
             try:
                 stream_url = await client.get_stream_url(camera_id)
-                print(f"✓ Stream URL retrieved successfully!")
+                print("✓ Stream URL retrieved successfully!")
                 print(f"  Stream URL: {stream_url}")
 
                 # Offer to play the stream
                 if stream_url and stream_url.startswith("rtsp://"):
-                    print(f"\n  This is an RTSP stream. You can:")
+                    print("\n  This is an RTSP stream. You can:")
                     print(f"    1. Play it with VLC: vlc {stream_url}")
-                    print(f"    2. Play it with ffplay: ffplay -rtsp_transport tcp {stream_url}")
-                    print(f"    3. Use play_rtsp_stream.py script")
+                    print(
+                        f"    2. Play it with ffplay: ffplay -rtsp_transport tcp {stream_url}"
+                    )
+                    print("    3. Use play_rtsp_stream.py script")
 
-                    play_stream = input("\n  Do you want to play the stream now? (yes/no): ").strip().lower()
+                    play_stream = (
+                        input("\n  Do you want to play the stream now? (yes/no): ")
+                        .strip()
+                        .lower()
+                    )
                     if play_stream == "yes":
                         # Try to use the play_rtsp_stream.py script
                         import subprocess
+
                         script_path = Path(__file__).parent / "play_rtsp_stream.py"
                         if script_path.exists():
-                            print(f"\n  Launching stream player...")
+                            print("\n  Launching stream player...")
                             try:
-                                subprocess.Popen([sys.executable, str(script_path), stream_url])
-                                print(f"  ✓ Stream player launched in background")
+                                subprocess.Popen(
+                                    [sys.executable, str(script_path), stream_url]
+                                )
+                                print("  ✓ Stream player launched in background")
                             except Exception as e:
                                 print(f"  ✗ Failed to launch player: {e}")
-                                print(f"  You can manually run: python play_rtsp_stream.py {stream_url}")
+                                print(
+                                    f"  You can manually run: python play_rtsp_stream.py {stream_url}"
+                                )
                         else:
-                            print(f"  ✗ play_rtsp_stream.py not found")
+                            print("  ✗ play_rtsp_stream.py not found")
                             print(f"  You can manually open with VLC: vlc {stream_url}")
 
             except Exception as e:
                 print(f"✗ Stream URL retrieval failed: {e}")
                 import traceback
+
                 traceback.print_exc()
                 stream_url = None
         else:
@@ -437,14 +455,22 @@ async def test_api_flow():
 
         # Test 7: Get snapshot (if access control available)
         if access_control_id and place_id:
-            print(f"\n[TEST 7] Testing video snapshot...")
-            print(f"  Endpoint: GET {API_VIDEO_SNAPSHOT.format(base_url='BASE_URL', place_id='{place_id}', access_control_id='{access_control_id}')}")
-            test_snapshot = input("  Do you want to test snapshot retrieval? (yes/no): ").strip().lower()
+            print("\n[TEST 7] Testing video snapshot...")
+            print(
+                f"  Endpoint: GET {API_VIDEO_SNAPSHOT.format(base_url='BASE_URL', place_id='{place_id}', access_control_id='{access_control_id}')}"
+            )
+            test_snapshot = (
+                input("  Do you want to test snapshot retrieval? (yes/no): ")
+                .strip()
+                .lower()
+            )
 
             if test_snapshot == "yes":
                 try:
-                    snapshot_data = await client.get_snapshot(place_id, access_control_id)
-                    print(f"✓ Snapshot retrieved successfully!")
+                    snapshot_data = await client.get_snapshot(
+                        place_id, access_control_id
+                    )
+                    print("✓ Snapshot retrieved successfully!")
                     print(f"  Snapshot size: {len(snapshot_data)} bytes")
 
                     # Save snapshot to file
@@ -455,6 +481,7 @@ async def test_api_flow():
                 except Exception as e:
                     print(f"✗ Snapshot retrieval failed: {e}")
                     import traceback
+
                     traceback.print_exc()
             else:
                 print("  Skipped snapshot test")
@@ -463,19 +490,24 @@ async def test_api_flow():
 
         # Test 8: Open door (if access control available)
         if access_control_id and place_id:
-            print(f"\n[TEST 8] Testing door open action...")
-            print(f"  Endpoint: POST {API_OPEN_DOOR.format(base_url='BASE_URL', place_id='{place_id}', access_control_id='{access_control_id}')}")
-            test_open = input("  Do you want to test door opening? (yes/no): ").strip().lower()
+            print("\n[TEST 8] Testing door open action...")
+            print(
+                f"  Endpoint: POST {API_OPEN_DOOR.format(base_url='BASE_URL', place_id='{place_id}', access_control_id='{access_control_id}')}"
+            )
+            test_open = (
+                input("  Do you want to test door opening? (yes/no): ").strip().lower()
+            )
 
             if test_open == "yes":
                 try:
                     result = await client.open_door(place_id, access_control_id)
                     print("✓ Door open request successful!")
-                    print(f"  Response:")
+                    print("  Response:")
                     print(f"  {json.dumps(result, indent=4, ensure_ascii=False)}")
                 except Exception as e:
                     print(f"✗ Door opening failed: {e}")
                     import traceback
+
                     traceback.print_exc()
             else:
                 print("  Skipped door open test")
@@ -484,17 +516,32 @@ async def test_api_flow():
 
         # Test 9: Custom request to any endpoint
         print("\n[TEST 9] Custom API request...")
-        print("  You can send a custom request to any endpoint with current tokens and headers")
-        test_custom = input("  Do you want to test a custom endpoint? (yes/no): ").strip().lower()
+        print(
+            "  You can send a custom request to any endpoint with current tokens and headers"
+        )
+        test_custom = (
+            input("  Do you want to test a custom endpoint? (yes/no): ").strip().lower()
+        )
 
         while test_custom == "yes":
             print("\n  [Custom Request]")
-            method = input("    Method (GET/POST/PUT/DELETE) [default: GET]: ").strip().upper() or "GET"
-            endpoint = input("    Endpoint (e.g., /rest/v1/forpost/cameras/123): ").strip()
+            method = (
+                input("    Method (GET/POST/PUT/DELETE) [default: GET]: ")
+                .strip()
+                .upper()
+                or "GET"
+            )
+            endpoint = input(
+                "    Endpoint (e.g., /rest/v1/forpost/cameras/123): "
+            ).strip()
 
             if not endpoint:
                 print("    ✗ Endpoint is required")
-                test_custom = input("  Do you want to test another custom endpoint? (yes/no): ").strip().lower()
+                test_custom = (
+                    input("  Do you want to test another custom endpoint? (yes/no): ")
+                    .strip()
+                    .lower()
+                )
                 continue
 
             if not endpoint.startswith("/"):
@@ -510,7 +557,13 @@ async def test_api_flow():
                         json_data = json.loads(json_input)
                     except json.JSONDecodeError as e:
                         print(f"    ✗ Invalid JSON: {e}")
-                        test_custom = input("  Do you want to test another custom endpoint? (yes/no): ").strip().lower()
+                        test_custom = (
+                            input(
+                                "  Do you want to test another custom endpoint? (yes/no): "
+                            )
+                            .strip()
+                            .lower()
+                        )
                         continue
 
             try:
@@ -533,21 +586,25 @@ async def test_api_flow():
                         resp.raise_for_status()
                         result = await resp.json()
 
-                print(f"    ✓ Request successful!")
-                print(f"    Response:")
+                print("    ✓ Request successful!")
+                print("    Response:")
                 print(f"    {json.dumps(result, indent=6, ensure_ascii=False)}")
 
             except Exception as e:
                 print(f"    ✗ Request failed: {e}")
                 import traceback
+
                 traceback.print_exc()
 
-            test_custom = input("\n  Do you want to test another custom endpoint? (yes/no): ").strip().lower()
+            test_custom = (
+                input("\n  Do you want to test another custom endpoint? (yes/no): ")
+                .strip()
+                .lower()
+            )
 
         print("\n" + "=" * 80)
         print("API INTEGRATION TEST COMPLETED!")
         print("=" * 80)
-
 
 
 if __name__ == "__main__":
@@ -558,5 +615,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nUnexpected error: {e}")
         import traceback
-        traceback.print_exc()
 
+        traceback.print_exc()

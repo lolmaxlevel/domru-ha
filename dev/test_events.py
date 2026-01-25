@@ -1,15 +1,16 @@
 """Test Events API endpoint."""
 
 import asyncio
-import sys
-import os
 import json
+import os
+import sys
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from custom_components.domru.api import DomruApiClient
 import aiohttp
+
+from custom_components.domru.api import DomruApiClient
 
 
 async def test_events():
@@ -31,13 +32,13 @@ async def test_events():
 
         print("\n2. Getting data...")
         data = await client.async_get_data()
-        print(f"   ✓ Got data")
+        print("   ✓ Got data")
         print(f"   Places: {len(data.get('places', []))}")
 
         place_id = None
-        if data.get('places'):
-            place = data['places'][0]
-            place_id = place.get('id')
+        if data.get("places"):
+            place = data["places"][0]
+            place_id = place.get("id")
             print(f"   Place ID: {place_id}")
             print(f"   Place Name: {place.get('name')}")
 
@@ -57,14 +58,16 @@ async def test_events():
                     print(f"\n   Event #{i}:")
                     print(f"   {json.dumps(event, indent=6, ensure_ascii=False)}")
             else:
-                print("\n   ⚠ No events found (это нормально если давно не было активности)")
+                print(
+                    "\n   ⚠ No events found (это нормально если давно не было активности)"
+                )
 
         except Exception as e:
             print(f"\n   ✗ Error: {e}")
             import traceback
+
             traceback.print_exc()
 
 
 if __name__ == "__main__":
     asyncio.run(test_events())
-

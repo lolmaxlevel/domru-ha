@@ -2,6 +2,14 @@
 
 target-version = "py313"
 
+# Exclude dev folder from linting
+exclude = [
+    "dev/",
+    ".git",
+    ".ruff_cache",
+    "__pycache__",
+]
+
 [lint]
 select = [
     "ALL",
@@ -13,6 +21,8 @@ ignore = [
     "D212", # multi-line-summary-first-line (incompatible with formatter)
     "COM812", # incompatible with formatter
     "ISC001", # incompatible with formatter
+    "PLR0913", # Too many arguments in function definition
+    "RUF001", # Я РУССКИЙ!!!!
 ]
 
 [lint.flake8-pytest-style]

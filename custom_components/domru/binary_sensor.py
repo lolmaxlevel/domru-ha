@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.binary_sensor import (
@@ -67,7 +67,9 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
         super().__init__(coordinator)
         self.entity_description = entity_description
         # Set unique ID for this binary sensor
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        )
 
     @property
     def is_on(self) -> bool:
@@ -91,12 +93,16 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
             # Ищем последний звонок
             for event in events:
                 event_type = event.get("eventTypeName", "")
-                if event_type in ["accessControlCallAccepted", "accessControlCallRejected", "accessControlCallMissed"]:
+                if event_type in [
+                    "accessControlCallAccepted",
+                    "accessControlCallRejected",
+                    "accessControlCallMissed",
+                ]:
                     timestamp = event.get("timestamp")
                     if timestamp:
                         try:
-                            event_time = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
-                            now = datetime.now(timezone.utc)
+                            event_time = datetime.fromtimestamp(int(timestamp), tz=UTC)
+                            now = datetime.now(UTC)
                             # Звонок был в последние 60 секунд
                             if (now - event_time) < timedelta(seconds=60):
                                 return True
@@ -118,7 +124,11 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
             # Найти последний звонок
             for event in events:
                 event_type = event.get("eventTypeName", "")
-                if event_type in ["accessControlCallAccepted", "accessControlCallRejected", "accessControlCallMissed"]:
+                if event_type in [
+                    "accessControlCallAccepted",
+                    "accessControlCallRejected",
+                    "accessControlCallMissed",
+                ]:
                     event_type_map = {
                         "accessControlCallAccepted": "Звонок принят",
                         "accessControlCallRejected": "Звонок отклонен",
@@ -134,4 +144,3 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
                     }
 
         return None
-

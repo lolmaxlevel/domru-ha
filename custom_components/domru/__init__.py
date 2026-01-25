@@ -16,12 +16,16 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.loader import async_get_loaded_integration
 
-from .api import DomruApiClient
+from . import services
+from .api import (
+    DomruApiClient,
+    DomruApiClientCommunicationError,
+    DomruApiClientError,
+)
 from .const import DOMAIN, LOGGER
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .sip import DomruSipClient
-from . import services
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -75,10 +79,16 @@ async def async_setup_entry(
         # Get SIP credentials
         sip_credentials = await client.async_get_sip_credentials(installation_id)
 
-        if sip_credentials.get("login") and sip_credentials.get("password") and sip_credentials.get("realm"):
-            LOGGER.info("SIP credentials received - login: %s, realm: %s",
-                       sip_credentials.get("login"),
-                       sip_credentials.get("realm"))
+        if (
+            sip_credentials.get("login")
+            and sip_credentials.get("password")
+            and sip_credentials.get("realm")
+        ):
+            LOGGER.info(
+                "SIP credentials received - login: %s, realm: %s",
+                sip_credentials.get("login"),
+                sip_credentials.get("realm"),
+            )
 
             # Create callback for incoming calls
             def on_call_callback(call_data: dict) -> None:
@@ -104,12 +114,19 @@ async def async_setup_entry(
             await sip_client.start()
             LOGGER.info("SIP client started successfully")
         else:
-            LOGGER.warning("SIP credentials not available (login: %s, password: %s, realm: %s), incoming calls disabled",
-                          bool(sip_credentials.get("login")),
-                          bool(sip_credentials.get("password")),
-                          bool(sip_credentials.get("realm")))
-    except Exception as err:  # pylint: disable=broad-except
-        LOGGER.warning("Failed to initialize SIP client: %s", err, exc_info=True)
+            LOGGER.warning(
+                "SIP credentials not available "
+                "(login: %s, password: %s, realm: %s), "
+                "incoming calls disabled",
+                bool(sip_credentials.get("login")),
+                bool(sip_credentials.get("password")),
+                bool(sip_credentials.get("realm")),
+            )
+    except (
+        DomruApiClientError,
+        DomruApiClientCommunicationError,
+    ):  # pylint: disable=broad-except
+        LOGGER.warning("Failed to initialize SIP client", exc_info=True)
 
     entry.runtime_data = DomruData(
         client=client,
@@ -151,8 +168,11 @@ async def async_unload_entry(
         try:
             await entry.runtime_data.sip_client.stop()
             LOGGER.info("SIP client stopped")
-        except Exception as err:  # pylint: disable=broad-except
-            LOGGER.error("Error stopping SIP client: %s", err)
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+        ):  # pylint: disable=broad-except
+            LOGGER.error("Error stopping SIP client", exc_info=True)
 
     # Unload services if this is the last entry
     entries = hass.config_entries.async_entries(DOMAIN)

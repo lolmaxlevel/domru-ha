@@ -10,9 +10,9 @@ from homeassistant.const import EntityCategory
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .api import DomruApiClient
     from .coordinator import DomruDataUpdateCoordinator
     from .data import DomruConfigEntry
 
@@ -27,7 +27,6 @@ ENTITY_DESCRIPTIONS = (
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
     entry: DomruConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -49,14 +48,16 @@ class DomruButtonEntity(DomruEntity, ButtonEntity):
         self,
         coordinator: DomruDataUpdateCoordinator,
         entity_description: ButtonEntityDescription,
-        client,
+        client: DomruApiClient,
     ) -> None:
         """Initialize the button class."""
         super().__init__(coordinator)
         self.entity_description = entity_description
         self._client = client
         # Set unique ID for this button
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.entry_id}_{entity_description.key}"
+        )
 
     async def async_press(self) -> None:
         """Handle the button press."""
@@ -67,18 +68,16 @@ class DomruButtonEntity(DomruEntity, ButtonEntity):
             places = data.get("places", [])
 
             if not places or not access_controls:
-                raise ValueError("No places or access controls available")
+                err_msg = "No places or access controls available"
+                raise ValueError(err_msg)
 
             place_id = places[0].get("id")
             device_id = access_controls[0].get("id")
 
             await self._client.async_open_door(
-                access_control_id=device_id,
-                place_id=place_id
+                access_control_id=device_id, place_id=place_id
             )
-            # Manually set the IDs for future use
-            self._client._place_id = place_id
-            self._client._access_control_id = device_id
+            # Store the IDs for future use
+            self._client.set_ids(place_id=place_id, access_control_id=device_id)
 
             await self.coordinator.async_request_refresh()
-
