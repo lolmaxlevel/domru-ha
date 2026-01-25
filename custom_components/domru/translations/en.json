@@ -1,0 +1,21 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "description": "Configure Dom.ru Smart Intercom integration. If you need help, visit: https://github.com/yourusername/domru-ha",
+                "data": {
+                    "username": "Username",
+                    "password": "Password"
+                }
+            }
+        },
+        "error": {
+            "auth": "Username/Password is wrong.",
+            "connection": "Unable to connect to the server.",
+            "unknown": "Unknown error occurred."
+        },
+        "abort": {
+            "already_configured": "This entry is already configured."
+        }
+    }
+}

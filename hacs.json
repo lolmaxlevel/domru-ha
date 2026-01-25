@@ -1,5 +1,5 @@
 {
-    "name": "Integration blueprint",
+    "name": "Dom.ru Smart Intercom",
     "homeassistant": "2025.2.4",
     "hacs": "2.0.5"
 }
