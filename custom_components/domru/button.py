@@ -10,6 +10,7 @@ from homeassistant.const import EntityCategory
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .api import DomruApiClient
@@ -27,6 +28,7 @@ ENTITY_DESCRIPTIONS = (
 
 
 async def async_setup_entry(
+    hass: HomeAssistant,  # noqa: ARG001
     entry: DomruConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
