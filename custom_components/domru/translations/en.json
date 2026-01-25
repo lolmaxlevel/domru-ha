@@ -2,7 +2,7 @@
     "config": {
         "step": {
             "user": {
-                "description": "If you need help with the configuration have a look here: https://github.com/ludeeus/integration_blueprint",
+                "description": "Configure Dom.ru Smart Intercom integration. If you need help, visit: https://github.com/lolmaxlevel/domru-ha",
                 "data": {
                     "username": "Username",
                     "password": "Password"
