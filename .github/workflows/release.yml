@@ -1,0 +1,76 @@
+name: Create Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Get current and previous versions
+        id: versions
+        run: |
+          import json
+          from packaging import version
+          import os
+          
+          # Get current version from manifest
+          with open('custom_components/domru/manifest.json') as f:
+              current_version = json.load(f)['version']
+          
+          print(f"current_version={current_version}")
+          
+          # Try to get the latest tag
+          import subprocess
+          try:
+              latest_tag = subprocess.check_output(
+                  ["git", "describe", "--tags", "--abbrev=0"],
+                  stderr=subprocess.DEVNULL,
+                  text=True
+              ).strip()
+              previous_version = latest_tag.lstrip('v')
+          except subprocess.CalledProcessError:
+              previous_version = "0.0.0"
+          
+          print(f"previous_version={previous_version}")
+          
+          # Compare versions
+          current = version.parse(current_version)
+          previous = version.parse(previous_version)
+          should_release = current > previous
+          
+          print(f"should_release={str(should_release).lower()}")
+          
+          # Write outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'current_version={current_version}\n')
+              f.write(f'previous_version={previous_version}\n')
+              f.write(f'should_release={str(should_release).lower()}\n')
+        shell: python3 {0}
+
+      - name: Create Release
+        if: steps.versions.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.versions.outputs.current_version }}
+          name: Version ${{ steps.versions.outputs.current_version }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
