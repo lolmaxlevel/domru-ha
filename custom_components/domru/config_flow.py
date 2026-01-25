@@ -27,6 +27,7 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for Dom.ru Smart Intercom."""
 
     VERSION = 1
+    supports_options_flow = True
 
     async def async_step_user(
         self,
@@ -94,6 +95,13 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
         await client.async_authenticate()
 
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> DomruOptionsFlowHandler:
+        """Create the options flow."""
+        return DomruOptionsFlowHandler(config_entry)
+
 
 class DomruOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle a option flow for Dom.ru Smart Intercom."""
@@ -137,7 +145,3 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
 
-# Set the options flow handler for the config flow
-DomruFlowHandler.async_get_options_flow = staticmethod(
-    lambda config_entry: DomruOptionsFlowHandler(config_entry)
-)
