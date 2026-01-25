@@ -1,0 +1,5 @@
+refresh_events:
+  name: Обновить события
+  description: Принудительно обновить список событий из API Dom.ru
+  fields: {}
+

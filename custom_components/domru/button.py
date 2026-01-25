@@ -55,6 +55,8 @@ class DomruButtonEntity(DomruEntity, ButtonEntity):
         super().__init__(coordinator)
         self.entity_description = entity_description
         self._client = client
+        # Set unique ID for this button
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{entity_description.key}"
 
     async def async_press(self) -> None:
         """Handle the button press."""

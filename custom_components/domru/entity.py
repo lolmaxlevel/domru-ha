@@ -17,7 +17,7 @@ class DomruEntity(CoordinatorEntity[DomruDataUpdateCoordinator]):
     def __init__(self, coordinator: DomruDataUpdateCoordinator) -> None:
         """Initialize."""
         super().__init__(coordinator)
-        self._attr_unique_id = coordinator.config_entry.entry_id
+        # Don't set unique_id here - let each entity set its own
         self._attr_device_info = DeviceInfo(
             identifiers={
                 (

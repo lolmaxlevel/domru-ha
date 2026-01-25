@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from .api import DomruApiClient
     from .coordinator import DomruDataUpdateCoordinator
+    from .sip import DomruSipClient
 
 
 type DomruConfigEntry = ConfigEntry[DomruData]
@@ -23,3 +24,4 @@ class DomruData:
     client: DomruApiClient
     coordinator: DomruDataUpdateCoordinator
     integration: Integration
+    sip_client: DomruSipClient | None = None

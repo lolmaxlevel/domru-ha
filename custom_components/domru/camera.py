@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import DomruEntity
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
 
     from .coordinator import DomruDataUpdateCoordinator
     from .data import DomruConfigEntry
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -52,6 +55,9 @@ async def async_setup_entry(
 class DomruCamera(DomruEntity, Camera):
     """Dom.ru camera class."""
 
+    # Указываем, что камера поддерживает стриминг
+    _attr_supported_features: CameraEntityFeature = CameraEntityFeature.STREAM
+
     def __init__(
         self,
         coordinator: DomruDataUpdateCoordinator,
@@ -67,23 +73,32 @@ class DomruCamera(DomruEntity, Camera):
         self._attr_name = camera_name
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{camera_id}"
         self._stream_url: str | None = None
+        # Отключаем автоматическое обновление снимков, используем только стрим
+        self._attr_is_streaming = True
 
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
         try:
             # Cache stream URL to avoid multiple API calls
             if not self._stream_url:
+                _LOGGER.debug("Fetching RTSP stream URL for camera %s", self._camera_id)
                 self._stream_url = await self._client.async_get_camera_stream_url(self._camera_id)
+                _LOGGER.info("Got RTSP stream URL for camera %s: %s", self._camera_id, self._stream_url)
             return self._stream_url
-        except Exception:  # pylint: disable=broad-except
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.error("Error getting stream URL for camera %s: %s", self._camera_id, err)
             return None
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return bytes of camera image."""
+        # Этот метод используется как fallback если стрим недоступен
+        # или для получения thumbnail в UI
         try:
+            _LOGGER.debug("Fetching snapshot for camera %s", self._camera_id)
             return await self._client.async_get_camera_snapshot(self._camera_id)
-        except Exception:  # pylint: disable=broad-except
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.error("Error getting snapshot for camera %s: %s", self._camera_id, err)
             return None
 

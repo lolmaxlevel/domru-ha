@@ -12,7 +12,6 @@ from urllib.parse import urljoin
 
 import aiohttp
 import async_timeout
-from aiohttp import AsyncResolver, TCPConnector
 from aiohttp.client_exceptions import ClientConnectorError, ContentTypeError
 
 
@@ -58,23 +57,6 @@ class DomruApiClient:
         self._hash2_prefix = "DigitalHomeNTK"
         self._secret = "789sdgHJs678wertv34712376"
 
-        # Replace connector with one using AsyncResolver instead of aiodns
-        self._patch_session_resolver()
-
-    def _patch_session_resolver(self) -> None:
-        """Replace the session connector's resolver with AsyncResolver."""
-        try:
-            connector = self._session.connector
-            if connector is None:
-                return
-            new_connector = TCPConnector(
-                resolver=AsyncResolver(),
-                force_close=False,
-                enable_cleanup_closed=True,
-            )
-            self._session._connector = new_connector
-        except Exception:  # pylint: disable=broad-except
-            pass
 
     def _get_hash1(self) -> str:
         """Generate hash1 (SHA1 of password in base64)."""
@@ -168,6 +150,7 @@ class DomruApiClient:
             "cameras": [],
             "access_controls": [],
             "finances": {},
+            "events": [],
         }
 
         # Get subscriber places
@@ -209,6 +192,14 @@ class DomruApiClient:
             data["finances"] = finances
         except Exception:  # pylint: disable=broad-except
             pass
+
+        # Get events (if we have place_id)
+        if self._place_id:
+            try:
+                events = await self.async_get_events(self._place_id, limit=20)
+                data["events"] = events
+            except Exception:  # pylint: disable=broad-except
+                pass
 
         return data
 
@@ -337,6 +328,97 @@ class DomruApiClient:
                 return response["URL"]
 
         return str(response) if response else ""
+
+    async def async_get_sip_credentials(self, installation_id: str) -> dict[str, str]:
+        """Get SIP credentials for receiving calls."""
+        # Need to get the sipdevices URL from place data
+        # First, try to get it from the subscriber place
+        try:
+            places_data = await self.get_subscriber_places()
+            if not places_data:
+                return {"login": "", "password": "", "realm": ""}
+
+            # Extract place from response
+            first_place_data = places_data[0] if isinstance(places_data, list) else places_data
+            place = first_place_data.get("place", first_place_data) if isinstance(first_place_data, dict) else {}
+
+            # Try to find sipdevices URL
+            # The URL is typically in format: https://myhome.proptech.ru/rest/v1/places/{placeId}/accesscontrols/{deviceId}/sipdevices
+            place_id = place.get("id")
+            access_controls = place.get("accessControls", [])
+
+            if not place_id or not access_controls:
+                return {"login": "", "password": "", "realm": ""}
+
+            # Get first access control device
+            device = access_controls[0]
+            device_id = device.get("id")
+
+            if not device_id:
+                return {"login": "", "password": "", "realm": ""}
+
+            # Build sipdevices URL
+            url = urljoin(
+                self.BASE_URL,
+                f"rest/v1/places/{place_id}/accesscontrols/{device_id}/sipdevices"
+            )
+
+            json_data = {"installationId": installation_id}
+
+            result = await self._api_wrapper(
+                url=url,
+                method="POST",
+                json=json_data,
+            )
+
+            # Response format: {"data": {"login": "...", "password": "...", "realm": "..."}}
+            if isinstance(result, dict):
+                data = result.get("data", result)
+                return {
+                    "login": data.get("login", ""),
+                    "password": data.get("password", ""),
+                    "realm": data.get("realm", ""),
+                }
+
+            return {"login": "", "password": "", "realm": ""}
+
+        except Exception as e:  # pylint: disable=broad-except
+            # Log error but don't fail setup
+            import logging
+            logging.getLogger(__name__).error("Failed to get SIP credentials: %s", e)
+            return {"login": "", "password": "", "realm": ""}
+
+    async def async_get_events(self, place_id: str | int, limit: int = 50) -> list[dict[str, Any]]:
+        """Get events history for a place."""
+        try:
+            url = urljoin(
+                self.BASE_URL,
+                f"rest/v1/places/{place_id}/events?allowExtentedActions=true"
+            )
+
+            result = await self._api_wrapper(
+                url=url,
+                method="GET",
+            )
+
+            # Response format: {"data": [{"event": {...}}, ...]} or direct list
+            if isinstance(result, dict):
+                events = result.get("data", result.get("events", []))
+            elif isinstance(result, list):
+                events = result
+            else:
+                events = []
+
+            # Limit number of events
+            if events and len(events) > limit:
+                events = events[:limit]
+
+            return events if isinstance(events, list) else []
+
+        except Exception as e:  # pylint: disable=broad-except
+            import logging
+            logging.getLogger(__name__).warning("Failed to get events: %s", e)
+            return []
 
     def _get_headers(self) -> dict[str, str]:
         """Get default headers for API requests."""

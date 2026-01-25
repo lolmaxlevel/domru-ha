@@ -130,7 +130,6 @@ class DomruAPIClient:
             return data
 
     async def get_cameras(self) -> Dict[str, Any]:
-        """Get cameras (from go-impl/pkg/domru/apiWrapper.go)."""
         url = API_CAMERAS.format(base_url=BASE_URL)
 
         async with self.session.get(
@@ -141,7 +140,6 @@ class DomruAPIClient:
             return await resp.json()
 
     async def get_places(self) -> Dict[str, Any]:
-        """Get subscriber places (from go-impl/pkg/domru/apiWrapper.go)."""
         url = API_SUBSCRIBER_PLACES.format(base_url=BASE_URL)
 
         async with self.session.get(
@@ -152,9 +150,8 @@ class DomruAPIClient:
             return await resp.json()
 
     async def get_stream_url(self, camera_id: int) -> str:
-        """Get camera stream URL."""
         # Add LightStream=0 query parameter (from custom_components/domru/api.py)
-        url = API_CAMERA_GET_STREAM.format(base_url=BASE_URL, camera_id=camera_id) + "?LightStream=0"
+        url = API_CAMERA_GET_STREAM.format(base_url=BASE_URL, camera_id=camera_id)
 
         async with self.session.get(
             url,
@@ -166,7 +163,7 @@ class DomruAPIClient:
             print(f"  DEBUG: Full API response:")
             print(f"  {json.dumps(data, indent=4, ensure_ascii=False)}")
 
-            # Parse VideoResponse structure from go-impl/pkg/domru/models/cameras.go
+            # Parse VideoResponse structure
             # Response: {"data": {"URL": "...", "Error": "...", "ErrorCode": "...", "Status": "..."}}
             if "data" in data and isinstance(data["data"], dict):
                 video_data = data["data"]
@@ -226,7 +223,7 @@ class DomruAPIClient:
             access_control_id=access_control_id
         )
 
-        # Send accessControlOpen action (from custom_components/domru/api.py)
+        # Send accessControlOpen action
         json_data = {"name": "accessControlOpen"}
 
         async with self.session.post(
@@ -273,8 +270,8 @@ async def test_api_flow():
 
     # Get credentials
     print("\n[INPUT] Getting credentials...")
-    username = "780059056016"
-    password = "E#X1fu-2"
+    username = input("Enter login")
+    password = input("Enter password")
 
     if not username or not password:
         print("✗ Username and password are required")
@@ -548,7 +545,7 @@ async def test_api_flow():
             test_custom = input("\n  Do you want to test another custom endpoint? (yes/no): ").strip().lower()
 
         print("\n" + "=" * 80)
-        print("✅ API INTEGRATION TEST COMPLETED!")
+        print("API INTEGRATION TEST COMPLETED!")
         print("=" * 80)
 
 

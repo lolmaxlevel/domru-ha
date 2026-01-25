@@ -7,6 +7,8 @@ https://github.com/yourusername/domru-ha
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,8 @@ from .api import DomruApiClient
 from .const import DOMAIN, LOGGER
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
+from .sip import DomruSipClient
+from . import services
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -30,6 +34,7 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.BUTTON,
     Platform.CAMERA,
+    Platform.EVENT,
 ]
 
 
@@ -57,10 +62,60 @@ async def async_setup_entry(
         name=DOMAIN,
         update_interval=timedelta(hours=1),
     )
+
+    # Initialize SIP client for incoming calls
+    sip_client = None
+    try:
+        # Generate installation ID from Home Assistant instance ID
+        instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
+        installation_id = _generate_installation_id(instance_id)
+
+        LOGGER.info("Getting SIP credentials with installation_id: %s", installation_id)
+
+        # Get SIP credentials
+        sip_credentials = await client.async_get_sip_credentials(installation_id)
+
+        if sip_credentials.get("login") and sip_credentials.get("password") and sip_credentials.get("realm"):
+            LOGGER.info("SIP credentials received - login: %s, realm: %s",
+                       sip_credentials.get("login"),
+                       sip_credentials.get("realm"))
+
+            # Create callback for incoming calls
+            def on_call_callback(call_data: dict) -> None:
+                """Handle incoming call."""
+                LOGGER.info("Incoming call received: %s", call_data)
+                # Trigger event
+                hass.bus.async_fire(
+                    f"{DOMAIN}_incoming_call",
+                    {
+                        "from": call_data.get("from", "Unknown"),
+                        "call_id": call_data.get("call_id", ""),
+                    },
+                )
+
+            sip_client = DomruSipClient(
+                realm=sip_credentials["realm"],
+                username=sip_credentials["login"],
+                password=sip_credentials["password"],
+                on_call_callback=on_call_callback,
+            )
+
+            # Start SIP client
+            await sip_client.start()
+            LOGGER.info("SIP client started successfully")
+        else:
+            LOGGER.warning("SIP credentials not available (login: %s, password: %s, realm: %s), incoming calls disabled",
+                          bool(sip_credentials.get("login")),
+                          bool(sip_credentials.get("password")),
+                          bool(sip_credentials.get("realm")))
+    except Exception as err:  # pylint: disable=broad-except
+        LOGGER.warning("Failed to initialize SIP client: %s", err, exc_info=True)
+
     entry.runtime_data = DomruData(
         client=client,
         integration=async_get_loaded_integration(hass, entry.domain),
         coordinator=coordinator,
+        sip_client=sip_client,
     )
 
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
@@ -69,7 +124,21 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
+    # Register services
+    await services.async_setup_services(hass)
+
     return True
+
+
+def _generate_installation_id(instance_id: str) -> str:
+    """Generate installation ID based on Home Assistant instance ID."""
+    h = hashlib.sha256(instance_id.encode()).hexdigest()
+    return str(
+        uuid.UUID(
+            f"{h[0:8]}-{h[8:12]}-4{h[13:16]}-"
+            f"{format((int(h[16], 16) & 0x3) | 0x8, 'x')}{h[17:20]}-{h[20:32]}"
+        )
+    )
 
 
 async def async_unload_entry(
@@ -77,6 +146,19 @@ async def async_unload_entry(
     entry: DomruConfigEntry,
 ) -> bool:
     """Handle removal of an entry."""
+    # Stop SIP client if running
+    if entry.runtime_data.sip_client:
+        try:
+            await entry.runtime_data.sip_client.stop()
+            LOGGER.info("SIP client stopped")
+        except Exception as err:  # pylint: disable=broad-except
+            LOGGER.error("Error stopping SIP client: %s", err)
+
+    # Unload services if this is the last entry
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if len(entries) == 1:  # This is the last one
+        await services.async_unload_services(hass)
+
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

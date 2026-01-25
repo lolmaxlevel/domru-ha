@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -22,13 +23,19 @@ if TYPE_CHECKING:
 ENTITY_DESCRIPTIONS = (
     BinarySensorEntityDescription(
         key="has_cameras",
-        name="Has Cameras",
+        name="Доступны камеры",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
     ),
     BinarySensorEntityDescription(
         key="has_access_controls",
-        name="Has Access Controls",
+        name="Доступны домофоны",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
+    ),
+    BinarySensorEntityDescription(
+        key="recent_call",
+        name="Недавний звонок",
+        device_class=BinarySensorDeviceClass.OCCUPANCY,
+        icon="mdi:phone-ring",
     ),
 )
 
@@ -59,6 +66,8 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
         """Initialize the binary_sensor class."""
         super().__init__(coordinator)
         self.entity_description = entity_description
+        # Set unique ID for this binary sensor
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{entity_description.key}"
 
     @property
     def is_on(self) -> bool:
@@ -73,4 +82,56 @@ class DomruBinarySensor(DomruEntity, BinarySensorEntity):
             access_controls = data.get("access_controls", [])
             return len(access_controls) > 0
 
+        if self.entity_description.key == "recent_call":
+            # Проверяем, был ли звонок в последние 60 секунд
+            events = data.get("events", [])
+            if not events:
+                return False
+
+            # Ищем последний звонок
+            for event in events:
+                event_type = event.get("eventTypeName", "")
+                if event_type in ["accessControlCallAccepted", "accessControlCallRejected", "accessControlCallMissed"]:
+                    timestamp = event.get("timestamp")
+                    if timestamp:
+                        try:
+                            event_time = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+                            now = datetime.now(timezone.utc)
+                            # Звонок был в последние 60 секунд
+                            if (now - event_time) < timedelta(seconds=60):
+                                return True
+                        except (ValueError, TypeError, OSError):
+                            pass
+                    break  # Проверили самое свежее событие звонка
+
+            return False
+
         return False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return extra state attributes."""
+        if self.entity_description.key == "recent_call":
+            data = self.coordinator.data
+            events = data.get("events", [])
+
+            # Найти последний звонок
+            for event in events:
+                event_type = event.get("eventTypeName", "")
+                if event_type in ["accessControlCallAccepted", "accessControlCallRejected", "accessControlCallMissed"]:
+                    event_type_map = {
+                        "accessControlCallAccepted": "Звонок принят",
+                        "accessControlCallRejected": "Звонок отклонен",
+                        "accessControlCallMissed": "Пропущенный звонок",
+                    }
+
+                    return {
+                        "message": event.get("message", ""),
+                        "type": event_type,
+                        "type_display": event_type_map.get(event_type, event_type),
+                        "timestamp": event.get("timestamp"),
+                        "event_id": event.get("id"),
+                    }
+
+        return None
+
