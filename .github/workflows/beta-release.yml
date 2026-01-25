@@ -1,9 +1,9 @@
-name: Create Release
+name: Create Beta Release
 
 on:
   push:
     branches:
-      - main
+      - dev
 
 permissions:
   contents: write
@@ -17,8 +17,8 @@ jobs:
     name: Check Validation
     uses: ./.github/workflows/validate.yml
 
-  release:
-    name: Create Release
+  beta-release:
+    name: Create Beta Release
     needs: [check-quality, check-validate]
     runs-on: ubuntu-latest
     steps:
@@ -35,12 +35,13 @@ jobs:
       - name: Install packaging
         run: python3 -m pip install packaging
 
-      - name: Get current and previous versions
+      - name: Get current version and beta tag
         id: versions
         run: |
           import json
           from packaging import version
           import os
+          from datetime import datetime
           
           # Get current version from manifest
           with open('custom_components/domru/manifest.json') as f:
@@ -48,40 +49,53 @@ jobs:
           
           print(f"current_version={current_version}")
           
-          # Try to get the latest tag
+          # Create beta version with timestamp
+          # Format: v1.0.3-beta.20250125.1
+          now = datetime.utcnow()
+          date_str = now.strftime('%Y%m%d')
+          
+          # Try to get the latest beta tag for today
           import subprocess
           try:
-              latest_tag = subprocess.check_output(
-                  ["git", "describe", "--tags", "--abbrev=0"],
+              # Get all beta tags for today
+              result = subprocess.check_output(
+                  ["git", "tag", "-l", f"v{current_version}-beta.{date_str}.*"],
                   stderr=subprocess.DEVNULL,
                   text=True
               ).strip()
-              previous_version = latest_tag.lstrip('v')
-          except subprocess.CalledProcessError:
-              previous_version = "0.0.0"
+              
+              beta_tags = result.split('\n') if result else []
+              beta_tags = [t for t in beta_tags if t]
+              
+              if beta_tags:
+                  # Get the latest beta tag and increment counter
+                  latest_beta = sorted(beta_tags)[-1]
+                  # Extract counter from tag like v1.0.3-beta.20250125.1
+                  counter = int(latest_beta.split('.')[-1]) + 1
+              else:
+                  counter = 1
+          except Exception:
+              counter = 1
           
-          print(f"previous_version={previous_version}")
+          beta_version = f"{current_version}-beta.{date_str}.{counter}"
+          beta_tag = f"v{beta_version}"
           
-          # Compare versions
-          current = version.parse(current_version)
-          previous = version.parse(previous_version)
-          should_release = current > previous
-          
-          print(f"should_release={str(should_release).lower()}")
+          print(f"beta_version={beta_version}")
+          print(f"beta_tag={beta_tag}")
           
           # Write outputs
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'current_version={current_version}\n')
-              f.write(f'previous_version={previous_version}\n')
-              f.write(f'should_release={str(should_release).lower()}\n')
+              f.write(f'beta_version={beta_version}\n')
+              f.write(f'beta_tag={beta_tag}\n')
         shell: python3 {0}
 
-      - name: Create Release
-        if: steps.versions.outputs.should_release == 'true'
+      - name: Create Beta Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.versions.outputs.current_version }}
-          name: Version ${{ steps.versions.outputs.current_version }}
+          tag_name: ${{ steps.versions.outputs.beta_tag }}
+          name: Beta Version ${{ steps.versions.outputs.beta_version }}
+          prerelease: true
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

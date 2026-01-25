@@ -53,6 +53,7 @@ async def async_setup_entry(
                     camera_name=camera_name,
                     camera_data=camera_data,
                     has_sound=has_sound,
+                    config_entry=entry,
                 )
             )
 
@@ -74,6 +75,7 @@ class DomruCamera(DomruEntity, Camera):
         camera_data: dict,
         *,
         has_sound: bool = False,
+        config_entry: DomruConfigEntry | None = None,
     ) -> None:
         """Initialize the camera class."""
         super().__init__(coordinator)
@@ -85,7 +87,17 @@ class DomruCamera(DomruEntity, Camera):
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{camera_id}"
         self._stream_url: str | None = None
         self._stream_url_time: float | None = None
-        self._stream_url_cache_time: float = 300.0  # Cache for 5 minutes
+
+        # Get caching settings from config entry options
+        if config_entry is None:
+            config_entry = coordinator.config_entry
+
+        options = config_entry.options
+        self._enable_cache = options.get("camera_stream_cache", False)
+        self._stream_url_cache_time = float(
+            options.get("camera_stream_cache_time", 300)
+        )
+
         # Отключаем автоматическое обновление снимков, используем только стрим
         self._attr_is_streaming = True
 
@@ -107,14 +119,37 @@ class DomruCamera(DomruEntity, Camera):
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
         current_time = time.time()
-        # Check if cache is expired
+
+        # If caching is disabled, always fetch fresh URL
+        if not self._enable_cache:
+            try:
+                _LOGGER.debug(
+                    "Fetching fresh RTSP stream URL for camera %s", self._camera_id
+                )
+                url = await self._client.async_get_camera_stream_url(self._camera_id)
+                _LOGGER.info(
+                    "Got RTSP stream URL for camera %s: %s",
+                    self._camera_id,
+                    url,
+                )
+                return url
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception(
+                    "Error getting stream URL for camera %s", self._camera_id
+                )
+                return None
+
+        # If caching is enabled, check if cache is expired
         if (
             not self._stream_url
             or not self._stream_url_time
             or (current_time - self._stream_url_time) > self._stream_url_cache_time
         ):
             try:
-                _LOGGER.debug("Fetching RTSP stream URL for camera %s", self._camera_id)
+                _LOGGER.debug(
+                    "Fetching RTSP stream URL for camera %s (cache expired)",
+                    self._camera_id,
+                )
                 self._stream_url = await self._client.async_get_camera_stream_url(
                     self._camera_id
                 )

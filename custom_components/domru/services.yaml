@@ -3,3 +3,4 @@ refresh_events:
   description: Принудительно обновить список событий из API Dom.ru
   fields: {}
 
+

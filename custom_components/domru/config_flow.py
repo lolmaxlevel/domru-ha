@@ -15,7 +15,12 @@ from .api import (
     DomruApiClientCommunicationError,
     DomruApiClientError,
 )
-from .const import DOMAIN, LOGGER
+from .const import (
+    CONF_CAMERA_STREAM_CACHE,
+    CONF_CAMERA_STREAM_CACHE_TIME,
+    DOMAIN,
+    LOGGER,
+)
 
 
 class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -88,3 +93,51 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             session=session,
         )
         await client.async_authenticate()
+
+
+class DomruOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle a option flow for Dom.ru Smart Intercom."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict | None = None
+    ) -> config_entries.FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_CAMERA_STREAM_CACHE,
+                        default=self.config_entry.options.get(
+                            CONF_CAMERA_STREAM_CACHE, False
+                        ),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_CAMERA_STREAM_CACHE_TIME,
+                        default=self.config_entry.options.get(
+                            CONF_CAMERA_STREAM_CACHE_TIME, 300
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=60,
+                            max=3600,
+                            step=60,
+                            unit_of_measurement="seconds",
+                        ),
+                    ),
+                },
+            ),
+        )
+
+
+# Set the options flow handler for the config flow
+DomruFlowHandler.async_get_options_flow = staticmethod(
+    lambda config_entry: DomruOptionsFlowHandler(config_entry)
+)

@@ -7,6 +7,13 @@
                     "username": "Username",
                     "password": "Password"
                 }
+            },
+            "init": {
+                "description": "Configure camera stream options",
+                "data": {
+                    "camera_stream_cache": "Cache camera stream URLs",
+                    "camera_stream_cache_time": "Cache duration (seconds)"
+                }
             }
         },
         "error": {
@@ -16,6 +23,17 @@
         },
         "abort": {
             "already_configured": "This entry is already configured."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "description": "Configure camera stream options",
+                "data": {
+                    "camera_stream_cache": "Cache camera stream URLs",
+                    "camera_stream_cache_time": "Cache duration (seconds)"
+                }
+            }
         }
     }
 }
