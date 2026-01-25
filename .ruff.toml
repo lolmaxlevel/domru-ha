@@ -23,6 +23,7 @@ ignore = [
     "ISC001", # incompatible with formatter
     "PLR0913", # Too many arguments in function definition
     "RUF001", # Я РУССКИЙ!!!!
+    "TRY300", # unnecessary "else" after "try"-"except"
 ]
 
 [lint.flake8-pytest-style]
