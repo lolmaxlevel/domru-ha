@@ -41,7 +41,7 @@ jobs:
           print(f"current_version={current_version}")
           
           # Create beta version with timestamp
-          # Format: v1.0.3-beta.20250125.1
+          # Format: v1.0.4.b20260125.2 (PEP 440 compatible)
           now = datetime.utcnow()
           date_str = now.strftime('%Y%m%d')
           
@@ -50,7 +50,7 @@ jobs:
           try:
               # Get all beta tags for today
               result = subprocess.check_output(
-                  ["git", "tag", "-l", f"v{current_version}-beta.{date_str}.*"],
+                  ["git", "tag", "-l", f"v{current_version}.b{date_str}.*"],
                   stderr=subprocess.DEVNULL,
                   text=True
               ).strip()
@@ -61,14 +61,14 @@ jobs:
               if beta_tags:
                   # Get the latest beta tag and increment counter
                   latest_beta = sorted(beta_tags)[-1]
-                  # Extract counter from tag like v1.0.3-beta.20250125.1
+                  # Extract counter from tag like v1.0.4.b20260125.2
                   counter = int(latest_beta.split('.')[-1]) + 1
               else:
                   counter = 1
           except Exception:
               counter = 1
           
-          beta_version = f"{current_version}-beta.{date_str}.{counter}"
+          beta_version = f"{current_version}.b{date_str}.{counter}"
           beta_tag = f"v{beta_version}"
           
           print(f"beta_version={beta_version}")

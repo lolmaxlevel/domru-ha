@@ -3,4 +3,18 @@ refresh_events:
   description: Принудительно обновить список событий из API Dom.ru
   fields: {}
 
+test_sip_call:
+  name: Тест входящего SIP звонка
+  description: Симулирует входящий SIP звонок для тестирования уведомлений и автоматизаций без реального звонка на домофон
+  fields: {}
+
+answer_call:
+  name: Принять звонок
+  description: Принять входящий SIP звонок от домофона (отправляет 200 OK)
+  fields: {}
+
+reject_call:
+  name: Отклонить звонок
+  description: Отклонить входящий SIP звонок от домофона (отправляет 486 Busy Here)
+  fields: {}
 

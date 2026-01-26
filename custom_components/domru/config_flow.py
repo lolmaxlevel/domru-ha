@@ -18,6 +18,9 @@ from .api import (
 from .const import (
     CONF_CAMERA_STREAM_CACHE,
     CONF_CAMERA_STREAM_CACHE_TIME,
+    CONF_SIP_ENABLED,
+    CONF_SIP_LOCAL_IP,
+    CONF_SIP_LOCAL_PORT,
     DOMAIN,
     LOGGER,
 )
@@ -138,6 +141,30 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                             max=3600,
                             step=60,
                             unit_of_measurement="seconds",
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SIP_ENABLED,
+                        default=self.config_entry.options.get(CONF_SIP_ENABLED, True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_SIP_LOCAL_IP,
+                        default=self.config_entry.options.get(CONF_SIP_LOCAL_IP, ""),
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.TEXT,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SIP_LOCAL_PORT,
+                        default=self.config_entry.options.get(
+                            CONF_SIP_LOCAL_PORT, 5060
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1024,
+                            max=65535,
+                            step=1,
                         ),
                     ),
                 },
