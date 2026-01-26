@@ -50,6 +50,11 @@ class DomruSipClient:
         self._last_nonce: str | None = None
         self._running = False
 
+        # Active call state
+        self._active_call: dict[str, Any] | None = None
+        self._active_call_timer: asyncio.TimerHandle | None = None
+        self._call_status = "idle"  # idle, ringing, answered
+
     def _get_local_ip(self) -> str:
         """Get local IP address."""
         try:
@@ -63,6 +68,80 @@ class DomruSipClient:
         else:
             s.close()
             return local_ip
+
+    @property
+    def call_status(self) -> str:
+        """Return current call status."""
+        return self._call_status
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether SIP client is running."""
+        return self._running
+
+    @property
+    def expires(self) -> int:
+        """Return registration expiration time."""
+        return self._expires
+
+    @property
+    def cseq(self) -> int:
+        """Return current CSeq number."""
+        return self._cseq
+
+    def get_active_call_info(self) -> dict[str, Any] | None:
+        """Return active call information."""
+        return self._active_call
+
+    def answer_call(self) -> bool:
+        """Answer the current incoming call."""
+        if not self._active_call or self._call_status != "ringing":
+            _LOGGER.warning("No incoming call to answer")
+            return False
+
+        _LOGGER.info("Answering call %s", self._active_call.get("call_id"))
+        self._call_status = "answered"
+        self._send_200_ok(self._active_call)
+
+        # Notify status change
+        if self.on_call_callback:
+            self.on_call_callback(
+                {
+                    "event": "call_answered",
+                    "call_id": self._active_call.get("call_id"),
+                }
+            )
+
+        return True
+
+    def reject_call(self) -> bool:
+        """Reject the current incoming call."""
+        if not self._active_call or self._call_status != "ringing":
+            _LOGGER.warning("No incoming call to reject")
+            return False
+
+        _LOGGER.info("Rejecting call %s", self._active_call.get("call_id"))
+        self._send_busy(self._active_call)
+        self._end_call()
+
+        return True
+
+    def _end_call(self) -> None:
+        """End the current call."""
+        if self._active_call_timer:
+            self._active_call_timer.cancel()
+            self._active_call_timer = None
+
+        self._active_call = None
+        self._call_status = "idle"
+
+        # Notify status change
+        if self.on_call_callback:
+            self.on_call_callback(
+                {
+                    "event": "call_ended",
+                }
+            )
 
     @staticmethod
     def _md5(s: str) -> str:
@@ -164,17 +243,33 @@ class DomruSipClient:
             self.local_port,
         )
 
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
 
-        self._protocol = SipProtocol(self)
-        self._transport, _ = await loop.create_datagram_endpoint(
-            lambda: self._protocol,
-            local_addr=(self.local_ip, self.local_port),
-        )
+            self._protocol = SipProtocol(self)
+            self._transport, _ = await loop.create_datagram_endpoint(
+                lambda: self._protocol,
+                local_addr=(self.local_ip, self.local_port),
+            )
 
-        self._running = True
-        self._unregister()
-        self._send_register()
+            self._running = True
+            self._unregister()
+            self._send_register()
+
+            _LOGGER.info(
+                "SIP client bound to %s:%d, ready to receive calls",
+                self.local_ip,
+                self.local_port,
+            )
+        except OSError:
+            _LOGGER.exception(
+                "Failed to bind SIP client to %s:%d - %s. "
+                "Port might be in use or you may need to run as administrator.",
+                self.local_ip,
+                self.local_port,
+                OSError.__name__,
+            )
+            raise
 
     async def stop(self) -> None:
         """Stop SIP client."""
@@ -207,9 +302,16 @@ class DomruSipClient:
 
         if self._cseq == 1:
             # First registration, send again with credentials
+            _LOGGER.info(
+                "SIP: Initial registration OK, sending authenticated registration"
+            )
             asyncio.get_event_loop().call_later(0.25, self._send_register)
         else:
             # Schedule next registration
+            _LOGGER.info(
+                "SIP: Registration successful, next registration in %d seconds",
+                self._expires - 5,
+            )
             self._schedule_register()
 
     def _handle_401_unauthorized(self, message: str) -> None:
@@ -234,6 +336,10 @@ class DomruSipClient:
             _LOGGER.error("SIP authentication failed - invalid credentials")
             return
 
+        _LOGGER.info(
+            "SIP: Received 401, sending authenticated REGISTER (attempt %d)",
+            self._auth_failure,
+        )
         self._cseq += 1
         auth = self._build_auth(realm, nonce)
         self._send_register(auth)
@@ -244,24 +350,62 @@ class DomruSipClient:
 
     def _handle_invite(self, message: str, addr: tuple[str, int]) -> None:
         """Handle incoming INVITE (call)."""
-        _LOGGER.info("Incoming call from %s:%d", addr[0], addr[1])
-
         # Extract SIP headers
         headers = self._extract_headers(message)
+        call_id = headers.get("call_id", "").replace("i:", "").strip()
+
+        # Check if this is a retransmission of the same call
+        if self._active_call and self._active_call.get("call_id") == call_id:
+            # Retransmission - just resend 100 Trying
+            _LOGGER.debug("Retransmission of call %s", call_id)
+            self._send_trying(self._active_call)
+            return
+
+        _LOGGER.info("=" * 60)
+        _LOGGER.info("INCOMING SIP CALL from %s:%d", addr[0], addr[1])
+        _LOGGER.info("=" * 60)
+
+        # Parse caller info
+        from_header = headers.get("from", "Unknown")
+        _LOGGER.info("From: %s", from_header)
+        _LOGGER.info("To: %s", headers.get("to", "Unknown"))
+        _LOGGER.info("Call-ID: %s", call_id)
+
+        # Store call information
+        self._active_call = {
+            "message": message,
+            "addr": addr,
+            "headers": headers,
+            "from": from_header,
+            "to": headers.get("to"),
+            "call_id": call_id,
+        }
+        self._call_status = "ringing"
+
+        # Send 100 Trying and 180 Ringing
+        self._send_trying(self._active_call)
+        loop = asyncio.get_event_loop()
+        loop.call_later(0.150, lambda: self._send_ringing(self._active_call))
+
+        # Auto-reject after 30 seconds if not answered
+        if self._active_call_timer:
+            self._active_call_timer.cancel()
+        self._active_call_timer = loop.call_later(30.0, self._auto_reject_call)
 
         # Notify about incoming call
         if self.on_call_callback:
             self.on_call_callback(
                 {
                     "event": "incoming_call",
-                    "from": headers.get("from"),
+                    "from": from_header,
                     "to": headers.get("to"),
-                    "call_id": headers.get("call_id"),
+                    "call_id": call_id,
                 }
             )
+        else:
+            _LOGGER.warning("No callback configured for incoming call")
 
-        # Send responses: 100 Trying, 180 Ringing, 486 Busy Here
-        self._send_invite_responses(message, addr)
+        _LOGGER.info("=" * 60)
 
     def _extract_headers(self, message: str) -> dict[str, str]:
         """Extract common SIP headers."""
@@ -282,9 +426,19 @@ class DomruSipClient:
             "cseq": extract_header("CSeq") or "",
         }
 
-    def _send_invite_responses(self, message: str, addr: tuple[str, int]) -> None:
-        """Send responses to INVITE."""
-        headers = self._extract_headers(message)
+    def _auto_reject_call(self) -> None:
+        """Auto-reject call after timeout."""
+        if self._active_call and self._call_status == "ringing":
+            _LOGGER.info("Auto-rejecting call after timeout")
+            self._send_busy(self._active_call)
+            self._end_call()
+
+    def _send_trying(self, call_info: dict[str, Any]) -> None:
+        """Send 100 Trying response."""
+        if not self._transport:
+            return
+
+        headers = call_info["headers"]
         to_tag = self._tag()
 
         trying = (
@@ -297,6 +451,16 @@ class DomruSipClient:
             f"Content-Length: 0\r\n\r\n"
         )
 
+        self._transport.sendto(trying.encode(), call_info["addr"])
+
+    def _send_ringing(self, call_info: dict[str, Any]) -> None:
+        """Send 180 Ringing response."""
+        if not self._transport or not call_info:
+            return
+
+        headers = call_info["headers"]
+        to_tag = self._tag()
+
         ringing = (
             f"SIP/2.0 180 Ringing\r\n"
             f"{headers['via']}\r\n"
@@ -306,6 +470,38 @@ class DomruSipClient:
             f"{headers['cseq']}\r\n"
             f"Content-Length: 0\r\n\r\n"
         )
+
+        self._transport.sendto(ringing.encode(), call_info["addr"])
+
+    def _send_200_ok(self, call_info: dict[str, Any]) -> None:
+        """Send 200 OK response (answer call)."""
+        if not self._transport:
+            return
+
+        headers = call_info["headers"]
+        to_tag = self._tag()
+
+        ok = (
+            f"SIP/2.0 200 OK\r\n"
+            f"{headers['via']}\r\n"
+            f"{headers['from']}\r\n"
+            f"{headers['to']};tag={to_tag}\r\n"
+            f"{headers['call_id']}\r\n"
+            f"{headers['cseq']}\r\n"
+            f"Contact: <sip:{self.username}@{self.local_ip}:{self.local_port}>\r\n"
+            f"Content-Type: application/sdp\r\n"
+            f"Content-Length: 0\r\n\r\n"
+        )
+
+        self._transport.sendto(ok.encode(), call_info["addr"])
+
+    def _send_busy(self, call_info: dict[str, Any]) -> None:
+        """Send 486 Busy Here response (reject call)."""
+        if not self._transport:
+            return
+
+        headers = call_info["headers"]
+        to_tag = self._tag()
 
         busy = (
             f"SIP/2.0 486 Busy Here\r\n"
@@ -317,11 +513,7 @@ class DomruSipClient:
             f"Content-Length: 0\r\n\r\n"
         )
 
-        # Send responses with delays
-        loop = asyncio.get_event_loop()
-        loop.call_later(0.025, lambda: self._transport.sendto(trying.encode(), addr))
-        loop.call_later(0.150, lambda: self._transport.sendto(ringing.encode(), addr))
-        loop.call_later(25.0, lambda: self._transport.sendto(busy.encode(), addr))
+        self._transport.sendto(busy.encode(), call_info["addr"])
 
     def _handle_options(self, message: str, addr: tuple[str, int]) -> None:
         """Handle OPTIONS request."""
@@ -341,6 +533,57 @@ class DomruSipClient:
 
         if self._transport:
             self._transport.sendto(ok.encode(), addr)
+
+    def _handle_ack(self, message: str, addr: tuple[str, int]) -> None:  # noqa: ARG002
+        """Handle ACK request."""
+        _LOGGER.debug("Received ACK for answered call")
+        # ACK confirms 200 OK, call is now established
+
+    def _handle_bye(self, message: str, addr: tuple[str, int]) -> None:
+        """Handle BYE request (call termination)."""
+        headers = self._extract_headers(message)
+
+        _LOGGER.info("Call ended by remote party")
+
+        # Send 200 OK response
+        ok = (
+            f"SIP/2.0 200 OK\r\n"
+            f"{headers['via']}\r\n"
+            f"{headers['from']}\r\n"
+            f"{headers['to']}\r\n"
+            f"{headers['call_id']}\r\n"
+            f"{headers['cseq']}\r\n"
+            f"Content-Length: 0\r\n\r\n"
+        )
+
+        if self._transport:
+            self._transport.sendto(ok.encode(), addr)
+
+        # End the call
+        self._end_call()
+
+    def _handle_cancel(self, message: str, addr: tuple[str, int]) -> None:
+        """Handle CANCEL request (call cancellation)."""
+        headers = self._extract_headers(message)
+
+        _LOGGER.info("Call cancelled by remote party")
+
+        # Send 200 OK response to CANCEL
+        ok = (
+            f"SIP/2.0 200 OK\r\n"
+            f"{headers['via']}\r\n"
+            f"{headers['from']}\r\n"
+            f"{headers['to']}\r\n"
+            f"{headers['call_id']}\r\n"
+            f"{headers['cseq']}\r\n"
+            f"Content-Length: 0\r\n\r\n"
+        )
+
+        if self._transport:
+            self._transport.sendto(ok.encode(), addr)
+
+        # End the call
+        self._end_call()
 
     def _handle_notify(self, message: str, addr: tuple[str, int]) -> None:
         """Handle NOTIFY request."""
@@ -373,10 +616,44 @@ class DomruSipClient:
             self._handle_403_forbidden()
         elif message.startswith("INVITE"):
             self._handle_invite(message, addr)
+        elif message.startswith("ACK"):
+            self._handle_ack(message, addr)
+        elif message.startswith("BYE"):
+            self._handle_bye(message, addr)
+        elif message.startswith("CANCEL"):
+            self._handle_cancel(message, addr)
         elif message.startswith("OPTIONS"):
             self._handle_options(message, addr)
         elif message.startswith("NOTIFY"):
             self._handle_notify(message, addr)
+
+    def simulate_incoming_call(self) -> None:
+        """Simulate an incoming call for testing purposes."""
+        if not self._running:
+            _LOGGER.warning("Cannot simulate call - SIP client not running")
+            return
+
+        _LOGGER.info("=" * 60)
+        _LOGGER.info("SIMULATING INCOMING SIP CALL (TEST)")
+        _LOGGER.info("=" * 60)
+
+        # Create test INVITE message
+        test_invite = (
+            f"INVITE sip:{self.username}@{self.local_ip}:{self.local_port} SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP {self.realm}:5060;branch=z9hG4bKtest\r\n"
+            f'From: "Test Caller" <sip:test@{self.realm}>;tag=test123\r\n'
+            f"To: <sip:{self.username}@{self.realm}>\r\n"
+            f"Call-ID: test-call-{self._tag()}\r\n"
+            f"CSeq: 1 INVITE\r\n"
+            f"Contact: <sip:test@{self.realm}:5060>\r\n"
+            f"Content-Length: 0\r\n\r\n"
+        )
+
+        # Simulate receiving this message from the server
+        self._handle_invite(test_invite, (self.realm, 5060))
+
+        _LOGGER.info("Test call simulation completed")
+        _LOGGER.info("=" * 60)
 
 
 class SipProtocol(asyncio.DatagramProtocol):

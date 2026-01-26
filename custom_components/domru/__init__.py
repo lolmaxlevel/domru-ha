@@ -22,7 +22,13 @@ from .api import (
     DomruApiClientCommunicationError,
     DomruApiClientError,
 )
-from .const import DOMAIN, LOGGER
+from .const import (
+    CONF_SIP_ENABLED,
+    CONF_SIP_LOCAL_IP,
+    CONF_SIP_LOCAL_PORT,
+    DOMAIN,
+    LOGGER,
+)
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .sip import DomruSipClient
@@ -69,64 +75,109 @@ async def async_setup_entry(
 
     # Initialize SIP client for incoming calls
     sip_client = None
-    try:
-        # Generate installation ID from Home Assistant instance ID
-        instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
-        installation_id = _generate_installation_id(instance_id)
 
-        LOGGER.info("Getting SIP credentials with installation_id: %s", installation_id)
+    # Check if SIP is enabled in options (default: True)
+    sip_enabled = entry.options.get(CONF_SIP_ENABLED, True)
 
-        # Get SIP credentials
-        sip_credentials = await client.async_get_sip_credentials(installation_id)
+    if not sip_enabled:
+        LOGGER.info("SIP is disabled in options")
+    else:
+        try:
+            # Generate installation ID from Home Assistant instance ID
+            instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
+            installation_id = _generate_installation_id(instance_id)
 
-        if (
-            sip_credentials.get("login")
-            and sip_credentials.get("password")
-            and sip_credentials.get("realm")
-        ):
             LOGGER.info(
-                "SIP credentials received - login: %s, realm: %s",
-                sip_credentials.get("login"),
-                sip_credentials.get("realm"),
+                "Getting SIP credentials with installation_id: %s", installation_id
             )
 
-            # Create callback for incoming calls
-            def on_call_callback(call_data: dict) -> None:
-                """Handle incoming call."""
-                LOGGER.info("Incoming call received: %s", call_data)
-                # Trigger event
-                hass.bus.async_fire(
-                    f"{DOMAIN}_incoming_call",
-                    {
-                        "from": call_data.get("from", "Unknown"),
-                        "call_id": call_data.get("call_id", ""),
-                    },
+            # Get SIP credentials
+            sip_credentials = await client.async_get_sip_credentials(installation_id)
+
+            if (
+                sip_credentials.get("login")
+                and sip_credentials.get("password")
+                and sip_credentials.get("realm")
+            ):
+                LOGGER.info(
+                    "SIP credentials received - login: %s, realm: %s",
+                    sip_credentials.get("login"),
+                    sip_credentials.get("realm"),
                 )
 
-            sip_client = DomruSipClient(
-                realm=sip_credentials["realm"],
-                username=sip_credentials["login"],
-                password=sip_credentials["password"],
-                on_call_callback=on_call_callback,
-            )
+                # Create callback for incoming calls
+                def on_call_callback(call_data: dict) -> None:
+                    """Handle incoming call."""
+                    event_type = call_data.get("event")
+                    LOGGER.info("SIP event: %s - %s", event_type, call_data)
 
-            # Start SIP client
-            await sip_client.start()
-            LOGGER.info("SIP client started successfully")
-        else:
-            LOGGER.warning(
-                "SIP credentials not available "
-                "(login: %s, password: %s, realm: %s), "
-                "incoming calls disabled",
-                bool(sip_credentials.get("login")),
-                bool(sip_credentials.get("password")),
-                bool(sip_credentials.get("realm")),
-            )
-    except (
-        DomruApiClientError,
-        DomruApiClientCommunicationError,
-    ):  # pylint: disable=broad-except
-        LOGGER.warning("Failed to initialize SIP client", exc_info=True)
+                    # Trigger event
+                    if event_type == "incoming_call":
+                        hass.bus.async_fire(
+                            f"{DOMAIN}_incoming_call",
+                            {
+                                "from": call_data.get("from", "Unknown"),
+                                "call_id": call_data.get("call_id", ""),
+                            },
+                        )
+                    elif event_type == "call_answered":
+                        hass.bus.async_fire(
+                            f"{DOMAIN}_call_answered",
+                            {
+                                "call_id": call_data.get("call_id", ""),
+                            },
+                        )
+                    elif event_type == "call_ended":
+                        hass.bus.async_fire(
+                            f"{DOMAIN}_call_ended",
+                            {},
+                        )
+
+                    # Update all sensor entities to reflect new call status
+                    for entity_id in hass.states.async_entity_ids("sensor"):
+                        if entity_id.startswith(f"sensor.{DOMAIN}"):
+                            entity = hass.data.get("entity_registry")
+                            if entity:
+                                hass.async_create_task(
+                                    hass.helpers.entity_component.async_update_entity(
+                                        entity_id
+                                    )
+                                )
+
+                # Get SIP settings from options
+                local_ip = entry.options.get(CONF_SIP_LOCAL_IP) or None
+                local_port = entry.options.get(CONF_SIP_LOCAL_PORT, 5060)
+
+                # Empty string means auto-detect
+                if local_ip == "":
+                    local_ip = None
+
+                sip_client = DomruSipClient(
+                    realm=sip_credentials["realm"],
+                    username=sip_credentials["login"],
+                    password=sip_credentials["password"],
+                    local_ip=local_ip,
+                    local_port=local_port,
+                    on_call_callback=on_call_callback,
+                )
+
+                # Start SIP client
+                await sip_client.start()
+                LOGGER.info("SIP client started successfully")
+            else:
+                LOGGER.warning(
+                    "SIP credentials not available "
+                    "(login: %s, password: %s, realm: %s), "
+                    "incoming calls disabled",
+                    bool(sip_credentials.get("login")),
+                    bool(sip_credentials.get("password")),
+                    bool(sip_credentials.get("realm")),
+                )
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+        ):  # pylint: disable=broad-except
+            LOGGER.warning("Failed to initialize SIP client", exc_info=True)
 
     entry.runtime_data = DomruData(
         client=client,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -60,6 +61,16 @@ ENTITY_DESCRIPTIONS = (
         icon="mdi:bell-ring",
         device_class=SensorDeviceClass.TIMESTAMP,
     ),
+    SensorEntityDescription(
+        key="sip_status",
+        name="Статус SIP",
+        icon="mdi:phone-voip",
+    ),
+    SensorEntityDescription(
+        key="call_status",
+        name="Статус звонка",
+        icon="mdi:phone-ring",
+    ),
 )
 
 
@@ -73,6 +84,7 @@ async def async_setup_entry(
         DomruSensor(
             coordinator=entry.runtime_data.coordinator,
             entity_description=entity_description,
+            entry=entry,
         )
         for entity_description in ENTITY_DESCRIPTIONS
     )
@@ -85,10 +97,12 @@ class DomruSensor(DomruEntity, SensorEntity):
         self,
         coordinator: DomruDataUpdateCoordinator,
         entity_description: SensorEntityDescription,
+        entry: DomruConfigEntry,
     ) -> None:
         """Initialize the sensor class."""
         super().__init__(coordinator)
         self.entity_description = entity_description
+        self._entry = entry
         # Set unique ID for this sensor
         self._attr_unique_id = (
             f"{coordinator.config_entry.entry_id}_{entity_description.key}"
@@ -110,6 +124,8 @@ class DomruSensor(DomruEntity, SensorEntity):
             "last_event": self._get_last_event,
             "place_name": self._get_place_name,
             "access_control_name": self._get_access_control_name,
+            "sip_status": self._get_sip_status,
+            "call_status": self._get_call_status,
         }
 
         handler = handlers.get(key)
@@ -185,16 +201,61 @@ class DomruSensor(DomruEntity, SensorEntity):
             return access_controls[0].get("name")
         return None
 
-        return None
+    def _get_sip_status(self, data: dict[str, Any]) -> str:  # noqa: ARG002
+        """Get SIP status."""
+        sip_client = self._entry.runtime_data.sip_client
+        if not sip_client:
+            return "Отключен"
+        if sip_client.is_running:
+            return "Подключен"
+        return "Ошибка"
+
+    def _get_call_status(self, data: dict[str, Any]) -> str:  # noqa: ARG002
+        """Get call status."""
+        sip_client = self._entry.runtime_data.sip_client
+        if not sip_client:
+            return "idle"
+
+        status = sip_client.call_status
+
+        # Translate to Russian
+        status_map = {
+            "idle": "Нет звонка",
+            "ringing": "Звонок",
+            "answered": "Отвечен",
+        }
+
+        return status_map.get(status, status)
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
+    def extra_state_attributes(self) -> dict[str, Any] | None:  # noqa: PLR0911
         """Return extra state attributes."""
         data = self.coordinator.data
         finances = data.get("finances", {})
 
+        # Call status attributes
+        if self.entity_description.key == "call_status":
+            sip_client = self._entry.runtime_data.sip_client
+            if not sip_client:
+                return None
+
+            call_info = sip_client.get_active_call_info()
+            if not call_info:
+                return None
+
+            # Parse From header to extract caller info
+            from_header = call_info.get("from", "")
+            caller_match = re.search(r'"([^"]+)"', from_header)
+            caller_name = caller_match.group(1) if caller_match else "Unknown"
+
+            return {
+                "caller": caller_name,
+                "call_id": call_info.get("call_id", ""),
+                "from_header": from_header,
+            }
+
+        # Balance attributes
         if self.entity_description.key == "balance":
-            # Возвращаем всю информацию o платеже
             return {
                 "balance": finances.get("balance"),
                 "block_type": finances.get("blockType"),
@@ -283,5 +344,20 @@ class DomruSensor(DomruEntity, SensorEntity):
                     "value": first_event.get("value"),
                 }
             return None
+
+        # SIP status attributes
+        if self.entity_description.key == "sip_status":
+            sip_client = self._entry.runtime_data.sip_client
+            if sip_client:
+                return {
+                    "running": sip_client.is_running,
+                    "local_ip": sip_client.local_ip,
+                    "local_port": sip_client.local_port,
+                    "realm": sip_client.realm,
+                    "username": sip_client.username,
+                    "expires": sip_client.expires,
+                    "cseq": sip_client.cseq,
+                }
+            return {"running": False}
 
         return None
