@@ -82,7 +82,7 @@ jobs:
         shell: python3 {0}
 
       - name: Create Beta Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.versions.outputs.beta_tag }}
           name: Beta Version ${{ steps.versions.outputs.beta_version }}
