@@ -266,9 +266,7 @@ class DigestAuth:
 
         if self.qop == "auth":
             cnonce_value = cnonce or secrets.token_hex(8)
-            response = _md5(
-                f"{ha1}:{self.nonce}:{nc}:{cnonce_value}:{self.qop}:{ha2}"
-            )
+            response = _md5(f"{ha1}:{self.nonce}:{nc}:{cnonce_value}:{self.qop}:{ha2}")
             return (
                 f'Digest username="{username}", realm="{self.realm}", '
                 f'nonce="{self.nonce}", uri="{uri}", response="{response}", '
@@ -738,10 +736,9 @@ class DomruSipClient:
 
     def _handle_register_challenge(self, message: SipMessage) -> None:
         """Respond to REGISTER 401 challenge."""
-        challenge_header = (
-            message.first_header("WWW-Authenticate")
-            or message.first_header("Proxy-Authenticate")
-        )
+        challenge_header = message.first_header(
+            "WWW-Authenticate"
+        ) or message.first_header("Proxy-Authenticate")
         if not challenge_header:
             self._record_error("registration challenge missing digest")
             _LOGGER.error("SIP 401 response did not include a digest challenge")
@@ -936,8 +933,7 @@ class DomruSipClient:
     def _send_invite_ok(self, call: SipCall) -> None:
         """Send 200 OK for INVITE with minimal SDP."""
         contact_uri = (
-            self._registered_contact_uri
-            or f"sip:{self.username}@{self.realm}"
+            self._registered_contact_uri or f"sip:{self.username}@{self.realm}"
         )
         body = (
             "v=0\r\n"

@@ -96,9 +96,7 @@ async def async_setup_entry(
         LOGGER.info("SIP is disabled in options")
     else:
         try:
-            sip_client, event_poller = await _setup_sip(
-                hass, entry, client
-            )
+            sip_client, event_poller = await _setup_sip(hass, entry, client)
         except (
             DomruApiClientError,
             DomruApiClientCommunicationError,
@@ -157,9 +155,7 @@ async def _setup_sip(
     instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
     installation_id = _generate_installation_id(instance_id)
 
-    LOGGER.info(
-        "Getting SIP credentials with installation_id: %s", installation_id
-    )
+    LOGGER.info("Getting SIP credentials with installation_id: %s", installation_id)
 
     # Get SIP credentials
     sip_credentials = await client.async_get_sip_credentials(installation_id)
@@ -190,9 +186,7 @@ async def _setup_sip(
     sip_host_ip = entry.options.get(CONF_SIP_HOST_IP) or None
     local_port = entry.options.get(CONF_SIP_LOCAL_PORT, 5060)
     sip_mode = entry.options.get(CONF_SIP_MODE, SIP_MODE_PERSISTENT)
-    poll_interval = entry.options.get(
-        CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL
-    )
+    poll_interval = entry.options.get(CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL)
 
     if local_ip == "":
         local_ip = None
@@ -255,13 +249,9 @@ async def _setup_sip(
     event_poller = None
     if sip_mode == SIP_MODE_ON_DEMAND:
         event_poller = asyncio.create_task(
-            _poll_events_loop(
-                hass, client, sip_client, poll_interval
-            )
+            _poll_events_loop(hass, client, sip_client, poll_interval)
         )
-        LOGGER.info(
-            "Event poller started (interval: %d seconds)", poll_interval
-        )
+        LOGGER.info("Event poller started (interval: %d seconds)", poll_interval)
 
     return sip_client, event_poller
 
@@ -275,10 +265,7 @@ def _schedule_courier_auto_open(
     if data is None:
         return
 
-    if (
-        not data.courier_auto_open_enabled
-        or data.courier_auto_open_in_progress
-    ):
+    if not data.courier_auto_open_enabled or data.courier_auto_open_in_progress:
         return
 
     data.courier_auto_open_in_progress = True
@@ -345,7 +332,8 @@ async def _poll_events_loop(
 
             # Fetch latest events
             events = await client.async_get_events(
-                client._place_id, limit=5  # noqa: SLF001
+                client._place_id,  # noqa: SLF001
+                limit=5,
             )
 
             if not events:
@@ -372,9 +360,7 @@ async def _poll_events_loop(
             LOGGER.info("Event polling loop cancelled")
             break
         except Exception:  # noqa: BLE001
-            LOGGER.debug(
-                "Error in event polling loop", exc_info=True
-            )
+            LOGGER.debug("Error in event polling loop", exc_info=True)
             # Continue polling even on errors
             await asyncio.sleep(interval)
 
