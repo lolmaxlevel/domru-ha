@@ -2,7 +2,7 @@
     "config": {
         "step": {
             "user": {
-                "description": "Configure Dom.ru Smart Intercom integration. If you need help, visit: https://github.com/lolmaxlevel/domru-ha",
+                "description": "Configure Dom.ru Smart Intercom integration. If you need help, visit the documentation.",
                 "data": {
                     "username": "Username",
                     "password": "Password"

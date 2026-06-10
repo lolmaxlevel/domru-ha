@@ -6,6 +6,7 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 
 - 🔐 Authentication using login and password
 - 🚪 Open door control
+- 🚚 One-shot courier auto-open switch for the next incoming call
 - 📸 Camera snapshots from intercom cameras
 - 📱 Display place and access control information
 - 🔔 Support for multiple intercom devices
@@ -35,11 +36,22 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 
 ## Supported Entities
 
-- **Sensor**: Place name, Access control name
+- **Sensor**: Balance, payment, block status, next payment date, and call status
 - **Button**: Open door
 - **Camera**: Intercom camera snapshots
-- **Binary Sensor**: Connectivity status
-- **Switch**: Future switch controls
+- **Binary Sensor**: Recent call and diagnostic connectivity status
+- **Switch**: Courier auto-open
+- **Diagnostic entities**: SIP status, camera/intercom availability, event count, and last event
+
+## Door opening behavior
+
+The **Open Door** button always sends the API command to open the door. If no
+intercom call is active, it only opens the door. If an incoming call is active,
+it answers the call, opens the door, and then hangs up.
+
+The **Courier Auto Open** switch is one-shot mode. Turn it on before a delivery:
+the next incoming call opens the door automatically, then the switch turns
+itself off.
 
 ## API Documentation
 

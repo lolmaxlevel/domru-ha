@@ -15,11 +15,13 @@ SERVICE_REFRESH_EVENTS = "refresh_events"
 SERVICE_TEST_SIP_CALL = "test_sip_call"
 SERVICE_ANSWER_CALL = "answer_call"
 SERVICE_REJECT_CALL = "reject_call"
+SERVICE_HANGUP_CALL = "hangup_call"
 
 SERVICE_REFRESH_EVENTS_SCHEMA = vol.Schema({})
 SERVICE_TEST_SIP_CALL_SCHEMA = vol.Schema({})
 SERVICE_ANSWER_CALL_SCHEMA = vol.Schema({})
 SERVICE_REJECT_CALL_SCHEMA = vol.Schema({})
+SERVICE_HANGUP_CALL_SCHEMA = vol.Schema({})
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -88,6 +90,22 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         LOGGER.warning("No SIP client found - SIP might be disabled or not configured")
 
+    async def handle_hangup_call(_: ServiceCall) -> None:
+        """Handle the hangup call service."""
+        entries = hass.config_entries.async_entries(DOMAIN)
+
+        for entry in entries:
+            if entry.runtime_data and entry.runtime_data.sip_client:
+                sip_client = entry.runtime_data.sip_client
+
+                if sip_client.hangup_call():
+                    LOGGER.info("Call hangup requested via service")
+                    return
+                LOGGER.warning("No active call to hang up")
+                return
+
+        LOGGER.warning("No SIP client found - SIP might be disabled or not configured")
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_REFRESH_EVENTS,
@@ -116,6 +134,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         schema=SERVICE_REJECT_CALL_SCHEMA,
     )
 
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_HANGUP_CALL,
+        handle_hangup_call,
+        schema=SERVICE_HANGUP_CALL_SCHEMA,
+    )
+
 
 async def async_unload_services(hass: HomeAssistant) -> None:
     """Unload Dom.ru services."""
@@ -123,3 +148,4 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_TEST_SIP_CALL)
     hass.services.async_remove(DOMAIN, SERVICE_ANSWER_CALL)
     hass.services.async_remove(DOMAIN, SERVICE_REJECT_CALL)
+    hass.services.async_remove(DOMAIN, SERVICE_HANGUP_CALL)
