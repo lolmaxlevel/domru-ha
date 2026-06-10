@@ -19,10 +19,16 @@ from .const import (
     CONF_CAMERA_STREAM_CACHE,
     CONF_CAMERA_STREAM_CACHE_TIME,
     CONF_SIP_ENABLED,
+    CONF_SIP_HOST_IP,
     CONF_SIP_LOCAL_IP,
     CONF_SIP_LOCAL_PORT,
+    CONF_SIP_MODE,
+    CONF_SIP_POLL_INTERVAL,
+    DEFAULT_SIP_POLL_INTERVAL,
     DOMAIN,
     LOGGER,
+    SIP_MODE_ON_DEMAND,
+    SIP_MODE_PERSISTENT,
 )
 
 
@@ -148,8 +154,49 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                         default=self.config_entry.options.get(CONF_SIP_ENABLED, True),
                     ): selector.BooleanSelector(),
                     vol.Optional(
+                        CONF_SIP_MODE,
+                        default=self.config_entry.options.get(
+                            CONF_SIP_MODE, SIP_MODE_PERSISTENT
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectSelectorOption(
+                                    label="Постоянная регистрация (стандартно)",
+                                    value=SIP_MODE_PERSISTENT,
+                                ),
+                                selector.SelectSelectorOption(
+                                    label="По запросу (через polling событий)",
+                                    value=SIP_MODE_ON_DEMAND,
+                                ),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SIP_POLL_INTERVAL,
+                        default=self.config_entry.options.get(
+                            CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1,
+                            max=60,
+                            step=1,
+                            unit_of_measurement="seconds",
+                        ),
+                    ),
+                    vol.Optional(
                         CONF_SIP_LOCAL_IP,
                         default=self.config_entry.options.get(CONF_SIP_LOCAL_IP, ""),
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.TEXT,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SIP_HOST_IP,
+                        default=self.config_entry.options.get(CONF_SIP_HOST_IP, ""),
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(
                             type=selector.TextSelectorType.TEXT,

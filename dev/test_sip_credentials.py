@@ -65,8 +65,8 @@ async def test_sip_credentials():
             sip_creds = await client.async_get_sip_credentials(installation_id)
 
             print("\n   ✓ SIP Credentials received:")
-            print(f"   Login: {sip_creds.get('login')}")
-            print(f"   Password: {sip_creds.get('password')}")
+            print(f"   Login: {'present' if sip_creds.get('login') else 'missing'}")
+            print(f"   Password: {'present' if sip_creds.get('password') else 'missing'}")
             print(f"   Realm: {sip_creds.get('realm')}")
 
             if not sip_creds.get("login"):
