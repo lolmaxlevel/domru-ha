@@ -39,6 +39,15 @@ API_FINANCES = "{base_url}/rest/v1/subscribers/profiles/finances"
 API_SUBSCRIBER_PROFILE = "{base_url}/rest/v1/subscribers/profiles"
 
 
+def _redact(value: str | None, *, visible_prefix: int = 6) -> str:
+    """Return a safe display value for credentials and signed URLs."""
+    if not value:
+        return "<missing>"
+    if len(value) <= visible_prefix:
+        return "<redacted>"
+    return f"{value[:visible_prefix]}...<redacted>"
+
+
 class DomruAPIClient:
     """DOM.RU API Client based on Go implementation."""
 
@@ -127,8 +136,8 @@ class DomruAPIClient:
 
             print("✓ Authentication successful!")
             print(f"  Operator ID: {self.operator_id}")
-            print(f"  Access Token: {self.access_token[:20]}...")
-            print(f"  Refresh Token: {self.refresh_token[:20]}...")
+            print(f"  Access Token: {_redact(self.access_token)}")
+            print(f"  Refresh Token: {_redact(self.refresh_token)}")
 
             return data
 
@@ -163,8 +172,7 @@ class DomruAPIClient:
             resp.raise_for_status()
             data = await resp.json()
 
-            print("  DEBUG: Full API response:")
-            print(f"  {json.dumps(data, indent=4, ensure_ascii=False)}")
+            print("  DEBUG: Stream response received")
 
             # Parse VideoResponse structure
             # Response: {"data": {"URL": "...", "Error": "...", "ErrorCode": "...", "Status": "..."}}
@@ -184,11 +192,14 @@ class DomruAPIClient:
                 if url_value:
                     # Check if URL starts with rtsp://
                     if not url_value.startswith("rtsp://"):
-                        print(f"  WARNING: URL doesn't start with rtsp://: {url_value}")
+                        print(
+                            "  WARNING: URL doesn't start with rtsp://: "
+                            f"{_redact(url_value)}"
+                        )
                         # Try to fix if it looks like domain without protocol
                         if "://" not in url_value:
                             url_value = "rtsp://" + url_value
-                            print(f"  Fixed URL: {url_value}")
+                            print(f"  Fixed URL: {_redact(url_value)}")
                     return url_value
                 print("  Warning: Empty URL in response")
                 return ""
@@ -287,8 +298,7 @@ async def test_api_flow():
         try:
             auth_response = await client.authenticate()
             print("✓ Authentication successful!")
-            print("  Full response:")
-            print(f"  {json.dumps(auth_response, indent=4, ensure_ascii=False)}")
+            print(f"  Auth fields: {', '.join(sorted(auth_response.keys()))}")
         except Exception as e:
             print(f"✗ Authentication failed: {e}")
             import traceback
@@ -406,14 +416,14 @@ async def test_api_flow():
             try:
                 stream_url = await client.get_stream_url(camera_id)
                 print("✓ Stream URL retrieved successfully!")
-                print(f"  Stream URL: {stream_url}")
+                print(f"  Stream URL: {_redact(stream_url)}")
 
                 # Offer to play the stream
                 if stream_url and stream_url.startswith("rtsp://"):
                     print("\n  This is an RTSP stream. You can:")
-                    print(f"    1. Play it with VLC: vlc {stream_url}")
+                    print("    1. Play it with VLC using the returned URL")
                     print(
-                        f"    2. Play it with ffplay: ffplay -rtsp_transport tcp {stream_url}"
+                        "    2. Play it with ffplay using the returned URL"
                     )
                     print("    3. Use play_rtsp_stream.py script")
 
@@ -437,11 +447,12 @@ async def test_api_flow():
                             except Exception as e:
                                 print(f"  ✗ Failed to launch player: {e}")
                                 print(
-                                    f"  You can manually run: python play_rtsp_stream.py {stream_url}"
+                                    "  You can manually run play_rtsp_stream.py with "
+                                    "the returned URL"
                                 )
                         else:
                             print("  ✗ play_rtsp_stream.py not found")
-                            print(f"  You can manually open with VLC: vlc {stream_url}")
+                            print("  You can manually open the returned URL with VLC")
 
             except Exception as e:
                 print(f"✗ Stream URL retrieval failed: {e}")

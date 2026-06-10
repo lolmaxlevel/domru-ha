@@ -8,10 +8,16 @@ __pycache__
 
 # misc
 .coverage
+.env*
 .vscode
 coverage.xml
 .ruff_cache
 .idea
+*.pcap
+*.pcapng
+snapshot.jpg
+camera_*.jpg
+cameras_data_*.json
 
 
 # Home Assistant configuration

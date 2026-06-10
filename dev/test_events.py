@@ -1,7 +1,6 @@
 """Test Events API endpoint."""
 
 import asyncio
-import json
 import os
 import sys
 
@@ -56,7 +55,9 @@ async def test_events():
                 print("\n   📜 Last 3 events:")
                 for i, event in enumerate(events[:3], 1):
                     print(f"\n   Event #{i}:")
-                    print(f"   {json.dumps(event, indent=6, ensure_ascii=False)}")
+                    print(f"   ID: {event.get('id')}")
+                    print(f"   Type: {event.get('eventTypeName')}")
+                    print(f"   Timestamp: {event.get('timestamp')}")
             else:
                 print(
                     "\n   ⚠ No events found (это нормально если давно не было активности)"

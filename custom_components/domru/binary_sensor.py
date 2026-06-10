@@ -10,6 +10,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import EntityCategory
 
 from .entity import DomruEntity
 
@@ -25,11 +26,13 @@ ENTITY_DESCRIPTIONS = (
         key="has_cameras",
         name="Доступны камеры",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     BinarySensorEntityDescription(
         key="has_access_controls",
         name="Доступны домофоны",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     BinarySensorEntityDescription(
         key="recent_call",

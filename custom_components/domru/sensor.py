@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -12,9 +11,14 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
+from homeassistant.const import EntityCategory
+from homeassistant.core import callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.util import dt as dt_util
 
+from .const import SIGNAL_CALL_STATUS_UPDATE
 from .entity import DomruEntity
+from .sip_entities import call_status_attributes, call_status_value
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -54,17 +58,20 @@ ENTITY_DESCRIPTIONS = (
         key="events_count",
         name="Количество событий",
         icon="mdi:history",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     SensorEntityDescription(
         key="last_event",
         name="Последнее событие",
         icon="mdi:bell-ring",
         device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     SensorEntityDescription(
         key="sip_status",
         name="Статус SIP",
         icon="mdi:phone-voip",
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     SensorEntityDescription(
         key="call_status",
@@ -107,6 +114,23 @@ class DomruSensor(DomruEntity, SensorEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.entry_id}_{entity_description.key}"
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Register live SIP status update callbacks."""
+        await super().async_added_to_hass()
+        if self.entity_description.key in {"sip_status", "call_status"}:
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    SIGNAL_CALL_STATUS_UPDATE,
+                    self._handle_sip_update,
+                )
+            )
+
+    @callback
+    def _handle_sip_update(self) -> None:
+        """Write current SIP state after a SIP event."""
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> str | float | datetime | None:
@@ -212,20 +236,7 @@ class DomruSensor(DomruEntity, SensorEntity):
 
     def _get_call_status(self, data: dict[str, Any]) -> str:  # noqa: ARG002
         """Get call status."""
-        sip_client = self._entry.runtime_data.sip_client
-        if not sip_client:
-            return "idle"
-
-        status = sip_client.call_status
-
-        # Translate to Russian
-        status_map = {
-            "idle": "Нет звонка",
-            "ringing": "Звонок",
-            "answered": "Отвечен",
-        }
-
-        return status_map.get(status, status)
+        return call_status_value(self._entry.runtime_data.sip_client)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:  # noqa: PLR0911
@@ -235,24 +246,7 @@ class DomruSensor(DomruEntity, SensorEntity):
 
         # Call status attributes
         if self.entity_description.key == "call_status":
-            sip_client = self._entry.runtime_data.sip_client
-            if not sip_client:
-                return None
-
-            call_info = sip_client.get_active_call_info()
-            if not call_info:
-                return None
-
-            # Parse From header to extract caller info
-            from_header = call_info.get("from", "")
-            caller_match = re.search(r'"([^"]+)"', from_header)
-            caller_name = caller_match.group(1) if caller_match else "Unknown"
-
-            return {
-                "caller": caller_name,
-                "call_id": call_info.get("call_id", ""),
-                "from_header": from_header,
-            }
+            return call_status_attributes(self._entry.runtime_data.sip_client)
 
         # Balance attributes
         if self.entity_description.key == "balance":
@@ -351,12 +345,20 @@ class DomruSensor(DomruEntity, SensorEntity):
             if sip_client:
                 return {
                     "running": sip_client.is_running,
+                    "registered": sip_client.is_registered,
+                    "mode": sip_client.registration_mode,
                     "local_ip": sip_client.local_ip,
                     "local_port": sip_client.local_port,
                     "realm": sip_client.realm,
                     "username": sip_client.username,
                     "expires": sip_client.expires,
                     "cseq": sip_client.cseq,
+                    "registrar_host": sip_client.server_addr[0],
+                    "registrar_port": sip_client.server_addr[1],
+                    "last_event": sip_client.last_event,
+                    "last_error": sip_client.last_error,
+                    "last_register_at": sip_client.last_register_at,
+                    "last_registered_at": sip_client.last_registered_at,
                 }
             return {"running": False}
 

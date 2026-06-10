@@ -58,6 +58,13 @@ def print_menu():
     print("═" * 60)
 
 
+def redact_url(value):
+    """Return a safe display value for signed stream URLs."""
+    if not value:
+        return "<missing>"
+    return f"{value[:12]}...<redacted>" if len(value) > 12 else "<redacted>"
+
+
 async def get_camera_snapshot(client, camera_id):
     """Get camera snapshot and save to file."""
     try:
@@ -89,12 +96,12 @@ async def get_camera_stream_url(client, camera_id):
 
         if stream_url:
             print("✅ URL видеопотока:")
-            print(f"   {stream_url}")
+            print(f"   {redact_url(stream_url)}")
 
             # Определяем тип потока
             if stream_url.startswith("rtsp://"):
                 print("\n   📡 Тип: RTSP поток")
-                print(f"   💡 Можно открыть в VLC: vlc {stream_url}")
+                print("   💡 Можно открыть в VLC с полученным URL")
             elif ".m3u8" in stream_url:
                 print("\n   📡 Тип: HLS поток (M3U8)")
                 print("   💡 Можно открыть в браузере или VLC")

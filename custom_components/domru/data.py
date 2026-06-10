@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import asyncio
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.loader import Integration
 
@@ -25,3 +27,6 @@ class DomruData:
     coordinator: DomruDataUpdateCoordinator
     integration: Integration
     sip_client: DomruSipClient | None = None
+    event_poller: asyncio.Task[None] | None = None
+    courier_auto_open_enabled: bool = False
+    courier_auto_open_in_progress: bool = False

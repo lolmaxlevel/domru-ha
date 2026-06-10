@@ -18,3 +18,7 @@ reject_call:
   description: Отклонить входящий SIP звонок от домофона (отправляет 486 Busy Here)
   fields: {}
 
+hangup_call:
+  name: Завершить звонок
+  description: Завершить активный SIP звонок от домофона (отправляет BYE после ответа)
+  fields: {}
