@@ -4,7 +4,7 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 
 ## Features
 
-- 🔐 Authentication using login and password
+- 🔐 Authentication using phone + SMS code or login and password
 - 🚪 Open door control
 - 🚚 One-shot courier auto-open switch for the next incoming call
 - 📸 Camera snapshots from intercom cameras
@@ -31,8 +31,10 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 1. Go to Settings → Devices & Services → Create Automation
 2. Click "Create Integration"
 3. Search for "Dom.ru Smart Intercom"
-4. Enter your login credentials (login/password)
-5. Complete the setup
+4. Choose Phone + SMS code or Username + password
+5. For phone login, enter your phone number, select an account, and confirm the SMS code
+6. For password login, enter your login credentials
+7. Complete the setup
 
 ## Supported Entities
 
@@ -53,13 +55,20 @@ The **Courier Auto Open** switch is one-shot mode. Turn it on before a delivery:
 the next incoming call opens the door automatically, then the switch turns
 itself off.
 
+> **Important:** Incoming calls depend on SIP registration. Dom.ru may route a
+> call to the mobile app instead of Home Assistant, so the integration can miss
+> some calls. Do not rely on it as the only critical way to answer calls or open
+> the door.
+
 ## API Documentation
 
 The integration is based on reverse-engineered API from Dom.ru mobile application. See `dom-ru-api.md` for detailed API documentation.
 
 ### Authentication
 
-The integration supports login/password authentication using hashed credentials:
+The integration supports phone authentication using SMS confirmation and stores
+the returned refresh token for future sessions. It also supports login/password
+authentication using hashed credentials:
 - `hash1`: SHA1 of password (base64 encoded)
 - `hash2`: MD5 of specific combined string with timestamp
 
@@ -108,4 +117,3 @@ For issues and questions, please visit:
 ## Disclaimer
 
 This integration is a reverse-engineered implementation based on the mobile application API. It is not officially supported by Dom.ru or Proptech. Use it at your own risk.
-

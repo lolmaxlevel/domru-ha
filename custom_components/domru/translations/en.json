@@ -2,10 +2,34 @@
     "config": {
         "step": {
             "user": {
-                "description": "Configure Dom.ru Smart Intercom integration. If you need help, visit: https://github.com/lolmaxlevel/domru-ha",
+                "description": "Choose how to sign in to Dom.ru Smart Intercom.",
+                "data": {
+                    "auth_method": "Sign-in method"
+                }
+            },
+            "password": {
+                "description": "Sign in with your Dom.ru username and password.",
                 "data": {
                     "username": "Username",
                     "password": "Password"
+                }
+            },
+            "phone": {
+                "description": "Enter your phone number in +7XXXXXXXXXX format.",
+                "data": {
+                    "phone": "Phone number"
+                }
+            },
+            "account": {
+                "description": "Choose the Dom.ru account for this Home Assistant entry.",
+                "data": {
+                    "account_id": "Account"
+                }
+            },
+            "sms": {
+                "description": "Enter the SMS confirmation code from Dom.ru.",
+                "data": {
+                    "sms_code": "SMS code"
                 }
             },
             "init": {
@@ -18,6 +42,7 @@
         },
         "error": {
             "auth": "Username/Password is wrong.",
+            "api_error": "Dom.ru returned an error: {error_message}",
             "connection": "Unable to connect to the server.",
             "unknown": "Unknown error occurred."
         },
