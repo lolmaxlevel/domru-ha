@@ -27,6 +27,8 @@ from .api import (
     DomruApiClientError,
 )
 from .const import (
+    CONF_OPERATOR_ID,
+    CONF_REFRESH_TOKEN,
     CONF_SIP_ENABLED,
     CONF_SIP_HOST_IP,
     CONF_SIP_LOCAL_IP,
@@ -67,9 +69,11 @@ async def async_setup_entry(
 ) -> bool:
     """Set up this integration using UI."""
     client = DomruApiClient(
-        username=entry.data[CONF_USERNAME],
-        password=entry.data[CONF_PASSWORD],
+        username=entry.data.get(CONF_USERNAME),
+        password=entry.data.get(CONF_PASSWORD),
         session=async_get_clientsession(hass),
+        refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+        operator_id=entry.data.get(CONF_OPERATOR_ID),
     )
 
     # Authenticate first

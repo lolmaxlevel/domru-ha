@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json as jsonlib
 import logging
 from datetime import UTC, datetime
 from json.decoder import JSONDecodeError
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import aiohttp
 import async_timeout
@@ -43,6 +44,7 @@ class DomruApiClient:
         "null | 10c99d90-9899-4a25-926f-067b34bc4a7f | null"
     )
     # HTTP status codes
+    HTTP_BAD_REQUEST = 400
     HTTP_UNAUTHORIZED = 401
     HTTP_FORBIDDEN = 403
     HTTP_INTERNAL_ERROR = 500
@@ -53,22 +55,34 @@ class DomruApiClient:
 
     def __init__(
         self,
-        username: str,
-        password: str,
+        username: str | None,
+        password: str | None,
         session: aiohttp.ClientSession,
+        refresh_token: str | None = None,
+        operator_id: str | int | None = None,
     ) -> None:
         """Initialize the API client."""
         self._username = username
         self._password = password
         self._session = session
         self._access_token: str | None = None
-        self._refresh_token: str | None = None
-        self._operator_id: str | None = None
+        self._refresh_token = refresh_token
+        self._operator_id = operator_id
         self._place_id: str | None = None
         self._access_control_id: str | None = None
         # Hash parameters from go-impl/pkg/auth/password.go
         self._hash2_prefix = "DigitalHomeNTK"
         self._secret = "789sdgHJs678wertv34712376"  # noqa: S105
+
+    @property
+    def refresh_token(self) -> str | None:
+        """Return the current refresh token."""
+        return self._refresh_token
+
+    @property
+    def operator_id(self) -> str | int | None:
+        """Return the current operator ID."""
+        return self._operator_id
 
     def _get_hash1(self) -> str:
         """Generate hash1 (SHA1 of password in base64)."""
@@ -159,6 +173,75 @@ class DomruApiClient:
         self._access_token = result.get("accessToken")
         self._refresh_token = result.get("refreshToken")
         self._operator_id = result.get("operatorId")
+
+        if not self._access_token:
+            msg = "No access token in refresh response"
+            raise DomruApiClientAuthenticationError(msg)
+
+    async def async_get_phone_accounts(self, phone: str) -> list[dict[str, Any]]:
+        """Get accounts available for a phone number."""
+        escaped_phone = quote(phone, safe="")
+        url = urljoin(self.BASE_URL, f"auth/v2/login/{escaped_phone}")
+        result = await self._api_wrapper(
+            url=url,
+            method="GET",
+            authenticated=False,
+            success_statuses=(self.HTTP_OK, 300),
+        )
+
+        return result if isinstance(result, list) else []
+
+    async def async_request_phone_confirmation(
+        self,
+        phone: str,
+        account: dict[str, Any],
+    ) -> None:
+        """Request an SMS confirmation code for the selected account."""
+        escaped_phone = quote(phone, safe="")
+        url = urljoin(self.BASE_URL, f"auth/v2/confirmation/{escaped_phone}")
+        await self._api_wrapper(
+            url=url,
+            method="POST",
+            json=account,
+            authenticated=False,
+        )
+
+    async def async_confirm_phone_code(
+        self,
+        phone: str,
+        code: str,
+        account: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Confirm an SMS code and store returned authentication tokens."""
+        escaped_phone = quote(phone, safe="")
+        url = urljoin(self.BASE_URL, f"auth/v3/auth/{escaped_phone}/confirmation")
+        json_data = {
+            "operatorId": account.get("operatorId"),
+            "login": phone,
+            "accountId": account.get("accountId"),
+            "profileId": account.get("profileId"),
+            "confirm1": code,
+            "confirm2": code,
+            "subscriberId": str(account.get("subscriberId")),
+        }
+
+        result = await self._api_wrapper(
+            url=url,
+            method="POST",
+            json=json_data,
+            authenticated=False,
+            bad_request_message="SMS code is wrong. Try again.",
+        )
+
+        self._access_token = result.get("accessToken")
+        self._refresh_token = result.get("refreshToken")
+        self._operator_id = result.get("operatorId")
+
+        if not self._access_token:
+            msg = "No access token in phone confirmation response"
+            raise DomruApiClientAuthenticationError(msg)
+
+        return result
 
     async def async_get_data(self) -> dict[str, Any]:
         """Get data from the API (places and devices)."""
@@ -518,7 +601,11 @@ class DomruApiClient:
             json_response.get("errorCode") if isinstance(json_response, dict) else None
         )
         if error_code == self.ERROR_TEMPORARY_CODE_FAILED:
-            msg = "Temporary code failed"
+            msg = (
+                json_response.get("message")
+                or json_response.get("errorMessage")
+                or "Invalid SMS confirmation code"
+            )
             raise DomruApiClientError(msg)
         msg = json_response if isinstance(json_response, str) else "Server error"
         raise DomruApiClientError(msg)
@@ -528,6 +615,31 @@ class DomruApiClient:
         msg = json_response if isinstance(json_response, str) else f"HTTP {status}"
         raise DomruApiClientError(msg)
 
+    def _handle_bad_request_error(self, message: str) -> None:
+        """Handle a request-specific 400 Bad Request error."""
+        raise DomruApiClientError(message)
+
+    async def _parse_response(
+        self,
+        response: aiohttp.ClientResponse,
+        allowed_statuses: tuple[int, ...],
+    ) -> Any:
+        """Parse JSON or text response bodies from the API."""
+        try:
+            return await response.json()
+        except (JSONDecodeError, ContentTypeError) as exception:
+            text_response = await response.text()
+            if not text_response and response.status in allowed_statuses:
+                return None
+            if text_response:
+                try:
+                    return jsonlib.loads(text_response)
+                except JSONDecodeError:
+                    return text_response
+
+            msg = f"Failed to parse response: {response.status} {response.reason}"
+            raise DomruApiClientError(msg) from exception
+
     async def _api_wrapper(
         self,
         method: str,
@@ -536,8 +648,11 @@ class DomruApiClient:
         headers: dict | None = None,
         *,
         authenticated: bool = True,
+        success_statuses: tuple[int, ...] | None = None,
+        bad_request_message: str | None = None,
     ) -> Any:
         """Make an API request with automatic token refresh on 401."""
+        allowed_statuses = success_statuses or (self.HTTP_OK, self.HTTP_CREATED)
         while True:
             try:
                 headers_to_use = headers or (
@@ -546,6 +661,7 @@ class DomruApiClient:
                     else {
                         "User-Agent": self.USER_AGENT,
                         "Content-Type": "application/json; charset=UTF-8",
+                        "Connection": "Keep-Alive",
                     }
                 )
 
@@ -562,15 +678,10 @@ class DomruApiClient:
                         await self._set_access_token()
                         continue  # Retry the request with new token
 
-                    # Try to parse response
-                    try:
-                        json_response = await response.json()
-                    except (JSONDecodeError, ContentTypeError) as e:
-                        msg = (
-                            "Failed to parse response: "
-                            f"{response.status} {response.reason}"
-                        )
-                        raise DomruApiClientError(msg) from e
+                    json_response = await self._parse_response(
+                        response,
+                        allowed_statuses,
+                    )
 
                     # Check for error responses
                     if response.status == self.HTTP_FORBIDDEN:
@@ -579,7 +690,10 @@ class DomruApiClient:
                     if response.status == self.HTTP_INTERNAL_ERROR:
                         self._handle_server_error(json_response)
 
-                    if response.status not in (self.HTTP_OK, self.HTTP_CREATED):
+                    if response.status == self.HTTP_BAD_REQUEST and bad_request_message:
+                        self._handle_bad_request_error(bad_request_message)
+
+                    if response.status not in allowed_statuses:
                         self._handle_http_error(json_response, response.status)
 
                     return json_response
