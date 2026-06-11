@@ -48,15 +48,29 @@ jobs:
           
           print(f"current_version={current_version}")
           
-          # Try to get the latest tag
+          # Try to get the latest stable tag. Beta tags from beta-release.yml use
+          # provider-friendly versions like 1.1.0.b20260611.1, which are not
+          # valid for packaging.version and must not block stable releases.
           import subprocess
           try:
-              latest_tag = subprocess.check_output(
-                  ["git", "describe", "--tags", "--abbrev=0"],
+              result = subprocess.check_output(
+                  ["git", "tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"],
                   stderr=subprocess.DEVNULL,
                   text=True
               ).strip()
-              previous_version = latest_tag.lstrip('v')
+
+              stable_tags = []
+              for tag in result.splitlines():
+                  tag_version = tag.lstrip('v')
+                  try:
+                      parsed = version.parse(tag_version)
+                  except version.InvalidVersion:
+                      continue
+
+                  if not parsed.is_prerelease:
+                      stable_tags.append(parsed)
+
+              previous_version = str(max(stable_tags)) if stable_tags else "0.0.0"
           except subprocess.CalledProcessError:
               previous_version = "0.0.0"
           
@@ -85,4 +99,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
