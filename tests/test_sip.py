@@ -131,11 +131,7 @@ class SipTestCase(unittest.TestCase):
         return client, transport
 
     def active_scheduled_handles(self) -> list[asyncio.TimerHandle]:
-        return [
-            handle
-            for handle in self.loop._scheduled
-            if not handle.cancelled()
-        ]
+        return [handle for handle in self.loop._scheduled if not handle.cancelled()]
 
 
 class SipMessageTests(unittest.TestCase):
