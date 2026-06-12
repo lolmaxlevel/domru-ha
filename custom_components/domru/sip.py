@@ -21,6 +21,9 @@ _LOGGER = logging.getLogger(__name__)
 SIP_SERVER_PORT = 5060
 DEFAULT_REGISTER_EXPIRES = 30
 RE_REGISTER_MARGIN = 5
+REGISTER_RESPONSE_TIMEOUT = 5.0
+REGISTER_RETRY_DELAY = 5.0
+ON_DEMAND_UNREGISTER_DELAY = 5.0
 MAX_AUTH_FAILURES = 2
 DEFAULT_CALL_TIMEOUT = 30.0
 DEFAULT_RTP_PORT = 10000
@@ -339,6 +342,12 @@ class DomruSipClient:
         self._registered = False
         self._registered_contact_uri = ""
         self._register_timer: asyncio.TimerHandle | None = None
+        self._register_response_timer: asyncio.TimerHandle | None = None
+        self._register_retry_timer: asyncio.TimerHandle | None = None
+        self._delayed_unregister_timer: asyncio.TimerHandle | None = None
+        self._register_response_timeout_seconds = REGISTER_RESPONSE_TIMEOUT
+        self._register_retry_delay_seconds = REGISTER_RETRY_DELAY
+        self._on_demand_unregister_delay_seconds = ON_DEMAND_UNREGISTER_DELAY
         self._auth_failure = 0
         self._last_nonce = ""
 
@@ -494,8 +503,19 @@ class DomruSipClient:
         if not self._running:
             _LOGGER.warning("Cannot register because SIP client is not running")
             return
+
+        delayed_unregister_cancelled = self._cancel_delayed_unregister()
+        self._cancel_register_retry_timer()
         if self._registered and not force:
-            _LOGGER.debug("Skipping SIP register because client is already registered")
+            if delayed_unregister_cancelled:
+                _LOGGER.debug(
+                    "Cancelled pending SIP unregister because registration was "
+                    "requested while already registered"
+                )
+            else:
+                _LOGGER.debug(
+                    "Skipping SIP register because client is already registered"
+                )
             return
 
         self._reset_registration()
@@ -611,6 +631,8 @@ class DomruSipClient:
         self._registered = False
         self._auth_failure = 0
         self._last_nonce = ""
+        self._cancel_register_response_timer()
+        self._cancel_register_retry_timer()
         if self._register_timer:
             self._register_timer.cancel()
             self._register_timer = None
@@ -704,9 +726,12 @@ class DomruSipClient:
             "yes" if authorization else "no",
         )
         self._send_to_server(self._build_register(authorization=authorization))
+        self._schedule_register_response_timeout()
 
     def _send_unregister(self) -> None:
         """Send unregister request."""
+        self._cancel_register_timers()
+        self._cancel_delayed_unregister()
         self._cseq += 1
         self._send_to_server(self._build_register(expires=0))
         self._registered = False
@@ -715,6 +740,8 @@ class DomruSipClient:
         """Handle a SIP response."""
         status = message.status_code
         method = message.cseq_method
+        if method == "REGISTER":
+            self._cancel_register_response_timer()
         if status == SIP_STATUS_UNAUTHORIZED and method == "REGISTER":
             self._handle_register_challenge(message)
             return
@@ -792,6 +819,7 @@ class DomruSipClient:
             _LOGGER.info("SIP unregistered successfully")
             return
 
+        self._cancel_register_retry_timer()
         self._registered = True
         self._auth_failure = 0
         self._last_error = None
@@ -818,9 +846,58 @@ class DomruSipClient:
 
     def _do_register(self) -> None:
         """Send a refresh REGISTER."""
+        self._register_timer = None
         self._cseq += 1
         _LOGGER.info("Refreshing SIP registration cseq=%d", self._cseq)
         self._send_register()
+
+    def _schedule_register_response_timeout(self) -> None:
+        """Schedule a watchdog for missing REGISTER responses."""
+        if not self._running:
+            return
+        self._cancel_register_response_timer()
+        delay = self._register_response_timeout_seconds
+        _LOGGER.debug("Scheduling SIP REGISTER response watchdog in %.1fs", delay)
+        self._register_response_timer = self._loop().call_later(
+            delay,
+            self._handle_register_response_timeout,
+        )
+
+    def _handle_register_response_timeout(self) -> None:
+        """Handle a missing SIP REGISTER response."""
+        self._register_response_timer = None
+        if not self._running:
+            return
+
+        self._registered = False
+        self._record_error("registration response timeout")
+        _LOGGER.warning(
+            "SIP REGISTER response timed out after %.1fs; scheduling retry in %.1fs",
+            self._register_response_timeout_seconds,
+            self._register_retry_delay_seconds,
+        )
+        self._emit_event("registration_failed", error=self._last_error)
+        self._schedule_register_retry()
+
+    def _schedule_register_retry(self) -> None:
+        """Schedule a fresh registration attempt after a failed REGISTER."""
+        if not self._running:
+            return
+        self._cancel_register_retry_timer()
+        delay = self._register_retry_delay_seconds
+        _LOGGER.debug("Scheduling SIP REGISTER retry in %.1fs", delay)
+        self._register_retry_timer = self._loop().call_later(
+            delay,
+            self._retry_register,
+        )
+
+    def _retry_register(self) -> None:
+        """Run a scheduled fresh registration attempt."""
+        self._register_retry_timer = None
+        if not self._running:
+            return
+        _LOGGER.info("Retrying SIP registration after missing REGISTER response")
+        self.register_now(force=True)
 
     def _handle_request(self, message: SipMessage, addr: tuple[str, int]) -> None:
         """Dispatch a SIP request."""
@@ -840,6 +917,7 @@ class DomruSipClient:
 
     def _handle_invite(self, message: SipMessage, addr: tuple[str, int]) -> None:
         """Handle inbound intercom INVITE."""
+        self._cancel_delayed_unregister()
         call_id = message.first_header("Call-ID")
         if self._active_call and self._active_call.call_id == call_id:
             if self._call_status == "ringing":
@@ -1058,7 +1136,24 @@ class DomruSipClient:
         _LOGGER.info("SIP call cleared call_id=%s", call_id)
         self._emit_event("call_ended")
         if self._registration_mode == "on_demand" and self._registered:
-            self._loop().call_later(5.0, self._send_unregister)
+            self._schedule_delayed_unregister()
+
+    def _schedule_delayed_unregister(self) -> None:
+        """Schedule delayed unregister for on-demand SIP mode."""
+        self._cancel_delayed_unregister()
+        delay = self._on_demand_unregister_delay_seconds
+        _LOGGER.debug("Scheduling SIP unregister in %.1fs", delay)
+        self._delayed_unregister_timer = self._loop().call_later(
+            delay,
+            self._run_delayed_unregister,
+        )
+
+    def _run_delayed_unregister(self) -> None:
+        """Run a scheduled on-demand unregister."""
+        self._delayed_unregister_timer = None
+        if self._running and self._registered:
+            _LOGGER.debug("Running delayed SIP unregister for on-demand mode")
+            self._send_unregister()
 
     def _cancel_call_timer(self) -> None:
         """Cancel the active call timeout."""
@@ -1066,12 +1161,39 @@ class DomruSipClient:
             self._call_timer.cancel()
             self._call_timer = None
 
-    def _cancel_timers(self) -> None:
-        """Cancel all timers."""
-        self._cancel_call_timer()
+    def _cancel_register_response_timer(self) -> None:
+        """Cancel the active REGISTER response watchdog."""
+        if self._register_response_timer:
+            self._register_response_timer.cancel()
+            self._register_response_timer = None
+
+    def _cancel_register_retry_timer(self) -> None:
+        """Cancel a pending REGISTER retry."""
+        if self._register_retry_timer:
+            self._register_retry_timer.cancel()
+            self._register_retry_timer = None
+
+    def _cancel_delayed_unregister(self) -> bool:
+        """Cancel a pending delayed unregister and return whether one existed."""
+        if not self._delayed_unregister_timer:
+            return False
+        self._delayed_unregister_timer.cancel()
+        self._delayed_unregister_timer = None
+        return True
+
+    def _cancel_register_timers(self) -> None:
+        """Cancel all registration-related timers."""
         if self._register_timer:
             self._register_timer.cancel()
             self._register_timer = None
+        self._cancel_register_response_timer()
+        self._cancel_register_retry_timer()
+
+    def _cancel_timers(self) -> None:
+        """Cancel all timers."""
+        self._cancel_call_timer()
+        self._cancel_register_timers()
+        self._cancel_delayed_unregister()
 
     def _loop(self) -> asyncio.AbstractEventLoop:
         """Return the current event loop."""
@@ -1098,6 +1220,29 @@ class DomruSipClient:
         """Store and log the last SIP error for entity diagnostics."""
         self._last_error = error
         self._last_event = "error"
+
+    def _handle_transport_error(self, error: str) -> None:
+        """Record a non-fatal SIP transport error for diagnostics."""
+        self._record_error(error)
+        self._emit_event("transport_error", error=error)
+
+    def _handle_connection_lost(self, exc: Exception | None) -> None:
+        """Mark the SIP client stopped after an unexpected UDP socket closure."""
+        if not self._running:
+            return
+
+        error = "SIP UDP socket closed"
+        if exc:
+            error = f"{error}: {exc}"
+
+        self._cancel_timers()
+        self._transport = None
+        self._running = False
+        self._registered = False
+        self._active_call = None
+        self._call_status = "idle"
+        self._record_error(error)
+        self._emit_event("transport_closed", error=error)
 
     def _log_wire(
         self,
@@ -1140,8 +1285,12 @@ class SipProtocol(asyncio.DatagramProtocol):
     def error_received(self, exc: Exception) -> None:
         """Log UDP errors."""
         _LOGGER.error("SIP UDP error: %s", exc)
+        self.sip_client._handle_transport_error(f"SIP UDP error: {exc}")  # noqa: SLF001
 
     def connection_lost(self, exc: Exception | None) -> None:
         """Log unexpected UDP socket closure."""
         if exc:
             _LOGGER.error("SIP UDP socket closed with error: %s", exc)
+        else:
+            _LOGGER.debug("SIP UDP socket closed")
+        self.sip_client._handle_connection_lost(exc)  # noqa: SLF001

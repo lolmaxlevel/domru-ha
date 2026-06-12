@@ -130,6 +130,13 @@ class SipTestCase(unittest.TestCase):
         client._running = True
         return client, transport
 
+    def active_scheduled_handles(self) -> list[asyncio.TimerHandle]:
+        return [
+            handle
+            for handle in self.loop._scheduled
+            if not handle.cancelled()
+        ]
+
 
 class SipMessageTests(unittest.TestCase):
     """SIP parser and builder behavior."""
@@ -407,6 +414,69 @@ class DomruSipClientTests(SipTestCase):
 
         self.assertIn("SIP registration rejected", "\n".join(logs.output))
         self.assertEqual(client.last_error, "registration forbidden")
+
+    def test_register_refresh_timeout_records_error_and_retries(self) -> None:
+        client, transport = self.make_client()
+        client._register_response_timeout_seconds = 0.1
+        client._register_retry_delay_seconds = 0.1
+
+        client.register_now(force=True)
+        ok = (
+            "SIP/2.0 200 OK\r\n"
+            "Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK\r\n"
+            "From: <sip:user@5676.spb.domofon.domru.ru>;tag=reg\r\n"
+            "To: <sip:user@5676.spb.domofon.domru.ru>;tag=server\r\n"
+            "Call-ID: reg-call\r\n"
+            "CSeq: 1 REGISTER\r\n"
+            "Contact: <sip:user@203.0.113.10:5060;transport=udp>;expires=6\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+        client.handle_message(ok.encode(), ("158.160.67.92", 5060))
+
+        with self.assertLogs("domru_sip_for_tests", level="WARNING") as logs:
+            self.loop.run_until_complete(asyncio.sleep(1.25))
+
+        self.assertIn("SIP REGISTER response timed out", "\n".join(logs.output))
+        self.assertEqual(client.last_error, "registration response timeout")
+        self.assertGreaterEqual(len(transport.sent), 3)
+        self.assertTrue(self.active_scheduled_handles())
+
+    def test_on_demand_register_cancels_pending_delayed_unregister(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+        client._registered = True
+        client._active_call = type("Call", (), {"call_id": "old-call"})()
+
+        client._end_call()
+        self.assertTrue(self.active_scheduled_handles())
+
+        client.register_now()
+
+        self.assertFalse(self.active_scheduled_handles())
+        self.assertTrue(client.is_registered)
+        self.assertEqual(transport.sent, [])
+
+    def test_udp_connection_lost_marks_client_not_running(self) -> None:
+        client, _transport = self.make_client()
+        client._registered = True
+        protocol = sip_module.SipProtocol(client)
+
+        with self.assertLogs("domru_sip_for_tests", level="ERROR") as logs:
+            protocol.connection_lost(RuntimeError("socket closed"))
+
+        self.assertIn("SIP UDP socket closed", "\n".join(logs.output))
+        self.assertFalse(client.is_running)
+        self.assertFalse(client.is_registered)
+        self.assertEqual(client.last_error, "SIP UDP socket closed: socket closed")
 
     def test_invite_logs_incoming_call_diagnostics(self) -> None:
         client, _transport = self.make_client()
