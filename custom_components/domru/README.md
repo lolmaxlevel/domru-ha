@@ -39,21 +39,41 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 ## Supported Entities
 
 - **Sensor**: Balance, payment, block status, next payment date, and call status
-- **Button**: Open door
+- **Button**: Open door, plus one button for each access control when multiple
+  access controls are available
 - **Camera**: Intercom camera snapshots
 - **Binary Sensor**: Recent call and diagnostic connectivity status
 - **Switch**: Courier auto-open
 - **Diagnostic entities**: SIP status, camera/intercom availability, event count, and last event
 
+## Known issues
+
+Camera previews or snapshots may not appear when the Dom.ru API returns
+`500 Internal Server Error` for
+`/rest/v1/forpost/cameras/{cameraId}/snapshots`. This is an upstream API
+response for the snapshot request; the camera stream may still work normally.
+
 ## Door opening behavior
 
-The **Open Door** button always sends the API command to open the door. If no
-intercom call is active, it only opens the door. If an incoming call is active,
-it answers the call, opens the door, and then hangs up.
+The **Open Door** button keeps the original behavior and opens the first
+available access control. The integration also creates a separate open button
+for each item returned in `access_controls` when there is more than one access
+control, so Lovelace dashboards can target a specific gate, entrance, or door
+directly without duplicate controls on single-door installs.
+
+Automations can call `domru.open_door` with either `access_control_id` or
+`door_index`. `door_index` is zero-based: `0` opens the first access control,
+`1` opens the second, and so on. If neither field is provided, the service opens
+the first available access control.
+
+If an incoming call is active, an open button answers the call, opens the door,
+and then hangs up. The `domru.open_door` service only sends the API open command.
 
 The **Courier Auto Open** switch is one-shot mode. Turn it on before a delivery:
 the next incoming call opens the door automatically, then the switch turns
-itself off.
+itself off. Use the **Courier Auto Open Door** select entity to choose which
+access control this one-shot mode opens. The select entity is disabled by
+default and unavailable when there is only one access control.
 
 > **Important:** Incoming calls depend on SIP registration. Dom.ru may route a
 > call to the mobile app instead of Home Assistant, so the integration can miss

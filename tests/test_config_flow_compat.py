@@ -21,6 +21,18 @@ class ConfigFlowCompatibilityTests(unittest.TestCase):
         self.assertIn("description_placeholders", source)
         self.assertIn("error_message", source)
 
+    def test_options_flow_does_not_assign_read_only_config_entry(self) -> None:
+        source = Path("custom_components/domru/config_flow.py").read_text()
+
+        self.assertNotIn("self.config_entry =", source)
+        self.assertIn("self._config_entry =", source)
+
+    def test_phone_flow_stores_normalized_client_tokens(self) -> None:
+        source = Path("custom_components/domru/config_flow.py").read_text()
+
+        self.assertIn("client.refresh_token", source)
+        self.assertIn("client.operator_id", source)
+
 
 if __name__ == "__main__":
     unittest.main()
