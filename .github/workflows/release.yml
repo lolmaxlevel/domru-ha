@@ -23,12 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
 
@@ -48,15 +48,29 @@ jobs:
           
           print(f"current_version={current_version}")
           
-          # Try to get the latest tag
+          # Try to get the latest stable tag. Beta tags from beta-release.yml use
+          # provider-friendly versions like 1.1.0.b20260611.1, which are not
+          # valid for packaging.version and must not block stable releases.
           import subprocess
           try:
-              latest_tag = subprocess.check_output(
-                  ["git", "describe", "--tags", "--abbrev=0"],
+              result = subprocess.check_output(
+                  ["git", "tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"],
                   stderr=subprocess.DEVNULL,
                   text=True
               ).strip()
-              previous_version = latest_tag.lstrip('v')
+
+              stable_tags = []
+              for tag in result.splitlines():
+                  tag_version = tag.lstrip('v')
+                  try:
+                      parsed = version.parse(tag_version)
+                  except version.InvalidVersion:
+                      continue
+
+                  if not parsed.is_prerelease:
+                      stable_tags.append(parsed)
+
+              previous_version = str(max(stable_tags)) if stable_tags else "0.0.0"
           except subprocess.CalledProcessError:
               previous_version = "0.0.0"
           
@@ -78,11 +92,10 @@ jobs:
 
       - name: Create Release
         if: steps.versions.outputs.should_release == 'true'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.versions.outputs.current_version }}
           name: Version ${{ steps.versions.outputs.current_version }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
