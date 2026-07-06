@@ -18,6 +18,26 @@ from aiohttp.client_exceptions import ClientConnectorError, ContentTypeError
 _LOGGER = logging.getLogger(__name__)
 
 
+def _auth_response_data(result: Any) -> dict[str, Any]:
+    """Return auth fields from a direct or wrapped API response."""
+    if not isinstance(result, dict):
+        return {}
+
+    data = result.get("data")
+    if isinstance(data, dict):
+        return data
+
+    return result
+
+
+def _auth_value(data: dict[str, Any], *keys: str) -> Any:
+    """Return the first present auth value from possible API key spellings."""
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
 class DomruApiClientError(Exception):
     """Exception to indicate a general API error."""
 
@@ -141,10 +161,13 @@ class DomruApiClient:
                 headers=headers,
                 authenticated=False,
             )
+            auth_data = _auth_response_data(result)
 
-            self._access_token = result.get("accessToken")
-            self._refresh_token = result.get("refreshToken")
-            self._operator_id = result.get("operatorId")
+            self._access_token = _auth_value(auth_data, "accessToken", "access_token")
+            self._refresh_token = _auth_value(
+                auth_data, "refreshToken", "refresh_token"
+            )
+            self._operator_id = _auth_value(auth_data, "operatorId", "operator_id")
 
             if not self._access_token:
                 msg = "No access token in response"
@@ -169,10 +192,11 @@ class DomruApiClient:
             headers=headers,
             authenticated=False,
         )
+        auth_data = _auth_response_data(result)
 
-        self._access_token = result.get("accessToken")
-        self._refresh_token = result.get("refreshToken")
-        self._operator_id = result.get("operatorId")
+        self._access_token = _auth_value(auth_data, "accessToken", "access_token")
+        self._refresh_token = _auth_value(auth_data, "refreshToken", "refresh_token")
+        self._operator_id = _auth_value(auth_data, "operatorId", "operator_id")
 
         if not self._access_token:
             msg = "No access token in refresh response"
@@ -232,16 +256,27 @@ class DomruApiClient:
             authenticated=False,
             bad_request_message="SMS code is wrong. Try again.",
         )
+        auth_data = _auth_response_data(result)
 
-        self._access_token = result.get("accessToken")
-        self._refresh_token = result.get("refreshToken")
-        self._operator_id = result.get("operatorId")
+        access_token = _auth_value(auth_data, "accessToken", "access_token")
+        refresh_token = _auth_value(auth_data, "refreshToken", "refresh_token")
+        operator_id = _auth_value(auth_data, "operatorId", "operator_id")
 
-        if not self._access_token:
+        if not access_token:
             msg = "No access token in phone confirmation response"
             raise DomruApiClientAuthenticationError(msg)
+        if not refresh_token:
+            msg = "No refresh token in phone confirmation response"
+            raise DomruApiClientAuthenticationError(msg)
+        if operator_id is None:
+            msg = "No operator ID in phone confirmation response"
+            raise DomruApiClientAuthenticationError(msg)
 
-        return result
+        self._access_token = access_token
+        self._refresh_token = refresh_token
+        self._operator_id = operator_id
+
+        return auth_data
 
     async def async_get_data(self) -> dict[str, Any]:
         """Get data from the API (places and devices)."""

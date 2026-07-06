@@ -1,4 +1,4 @@
-# ruff: noqa: D102,D107,EM102,TRY003,PT009
+# ruff: noqa: D102,D107,EM102,TRY003,PT009,PT027
 """Tests for shared Dom.ru door control helpers."""
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ sys.modules[spec.name] = door_module
 spec.loader.exec_module(door_module)
 
 async_open_first_door = door_module.async_open_first_door
+async_open_door = door_module.async_open_door
 
 
 class FakeClient:
@@ -67,6 +68,54 @@ class DoorHelperTests(unittest.TestCase):
         self.assertEqual(result, {"result": "ok"})
         self.assertEqual(client.ids, ("place-1", "door-1"))
         self.assertEqual(client.opened_with, ("door-1", "place-1"))
+
+    def test_open_door_uses_explicit_access_control_id(self) -> None:
+        client = FakeClient()
+        coordinator = FakeCoordinator(
+            {
+                "places": [{"id": "place-1"}],
+                "access_controls": [{"id": "door-1"}, {"id": "door-2"}],
+            }
+        )
+
+        result = asyncio.run(
+            async_open_door(
+                client,
+                coordinator,
+                access_control_id="door-2",
+            )
+        )
+
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(client.ids, ("place-1", "door-2"))
+        self.assertEqual(client.opened_with, ("door-2", "place-1"))
+
+    def test_open_door_uses_door_index(self) -> None:
+        client = FakeClient()
+        coordinator = FakeCoordinator(
+            {
+                "places": [{"id": "place-1"}],
+                "access_controls": [{"id": "door-1"}, {"id": "door-2"}],
+            }
+        )
+
+        result = asyncio.run(async_open_door(client, coordinator, door_index=1))
+
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(client.ids, ("place-1", "door-2"))
+        self.assertEqual(client.opened_with, ("door-2", "place-1"))
+
+    def test_open_door_rejects_unknown_door_index(self) -> None:
+        client = FakeClient()
+        coordinator = FakeCoordinator(
+            {
+                "places": [{"id": "place-1"}],
+                "access_controls": [{"id": "door-1"}],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "No access control found"):
+            asyncio.run(async_open_door(client, coordinator, door_index=1))
 
 
 if __name__ == "__main__":

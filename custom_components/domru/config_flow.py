@@ -272,11 +272,12 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 client = self._create_client()
-                result = await client.async_confirm_phone_code(
+                await client.async_confirm_phone_code(
                     self._phone,
                     user_input["sms_code"],
                     self._selected_account,
                 )
+                refresh_token, operator_id = _phone_auth_tokens(client)
             except DomruApiClientAuthenticationError as exception:
                 LOGGER.warning(exception)
                 self._last_error_message = _error_message(exception)
@@ -298,8 +299,8 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_AUTH_METHOD: AUTH_METHOD_PHONE,
                         CONF_PHONE: self._phone,
                         CONF_ACCOUNT_ID: self._selected_account.get("accountId"),
-                        CONF_REFRESH_TOKEN: result.get("refreshToken"),
-                        CONF_OPERATOR_ID: result.get("operatorId"),
+                        CONF_REFRESH_TOKEN: refresh_token,
+                        CONF_OPERATOR_ID: operator_id,
                     },
                 )
 
@@ -403,12 +404,22 @@ def _description_placeholders(message: str | None) -> dict[str, str]:
     return {"error_message": message or ""}
 
 
+def _phone_auth_tokens(client: DomruApiClient) -> tuple[str, str | int]:
+    """Return stored phone-login tokens or raise a config-flow auth error."""
+    refresh_token = client.refresh_token
+    operator_id = client.operator_id
+    if not refresh_token or operator_id is None:
+        msg = "No refresh token or operator ID in phone confirmation"
+        raise DomruApiClientAuthenticationError(msg)
+    return refresh_token, operator_id
+
+
 class DomruOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle a option flow for Dom.ru Smart Intercom."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict | None = None
@@ -423,13 +434,13 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Optional(
                         CONF_CAMERA_STREAM_CACHE,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_CAMERA_STREAM_CACHE, False
                         ),
                     ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_CAMERA_STREAM_CACHE_TIME,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_CAMERA_STREAM_CACHE_TIME, 300
                         ),
                     ): selector.NumberSelector(
@@ -442,11 +453,11 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SIP_ENABLED,
-                        default=self.config_entry.options.get(CONF_SIP_ENABLED, True),
+                        default=self._config_entry.options.get(CONF_SIP_ENABLED, True),
                     ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_SIP_MODE,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_SIP_MODE, SIP_MODE_PERSISTENT
                         ),
                     ): selector.SelectSelector(
@@ -466,7 +477,7 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SIP_POLL_INTERVAL,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL
                         ),
                     ): selector.NumberSelector(
@@ -479,7 +490,7 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SIP_LOCAL_IP,
-                        default=self.config_entry.options.get(CONF_SIP_LOCAL_IP, ""),
+                        default=self._config_entry.options.get(CONF_SIP_LOCAL_IP, ""),
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(
                             type=selector.TextSelectorType.TEXT,
@@ -487,7 +498,7 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SIP_HOST_IP,
-                        default=self.config_entry.options.get(CONF_SIP_HOST_IP, ""),
+                        default=self._config_entry.options.get(CONF_SIP_HOST_IP, ""),
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(
                             type=selector.TextSelectorType.TEXT,
@@ -495,7 +506,7 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SIP_LOCAL_PORT,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_SIP_LOCAL_PORT, 5060
                         ),
                     ): selector.NumberSelector(
