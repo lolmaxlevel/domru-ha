@@ -228,6 +228,62 @@ class ApiPhoneLoginTests(unittest.TestCase):
         self.assertEqual(client.refresh_token, "refresh")
         self.assertEqual(client.operator_id, 123)
 
+    def test_confirm_phone_code_accepts_nested_token_response(self) -> None:
+        account = {
+            "accountId": "account-1",
+            "profileId": "profile-1",
+            "operatorId": 123,
+            "subscriberId": 456,
+        }
+        session = FakeSession(
+            FakeResponse(
+                {
+                    "data": {
+                        "accessToken": "access",
+                        "refreshToken": "refresh",
+                        "operatorId": 123,
+                    }
+                }
+            )
+        )
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        result = asyncio.run(
+            client.async_confirm_phone_code("+79991112233", "1122", account)
+        )
+
+        self.assertEqual(result["refreshToken"], "refresh")
+        self.assertEqual(client.refresh_token, "refresh")
+        self.assertEqual(client.operator_id, 123)
+
+    def test_confirm_phone_code_requires_refresh_token_for_phone_login(self) -> None:
+        account = {
+            "accountId": "account-1",
+            "profileId": "profile-1",
+            "operatorId": 123,
+            "subscriberId": 456,
+        }
+        session = FakeSession(
+            FakeResponse(
+                {
+                    "accessToken": "access",
+                    "operatorId": 123,
+                }
+            )
+        )
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "No refresh token",
+        ):
+            asyncio.run(
+                client.async_confirm_phone_code("+79991112233", "1122", account)
+            )
+
+        self.assertIsNone(client.refresh_token)
+        self.assertIsNone(client.operator_id)
+
     def test_confirm_phone_code_failure_does_not_store_tokens(self) -> None:
         account = {
             "accountId": "account-1",
@@ -295,6 +351,31 @@ class ApiPhoneLoginTests(unittest.TestCase):
         self.assertTrue(request["url"].endswith("/auth/v2/session/refresh"))
         self.assertEqual(request["headers"]["Bearer"], "old-refresh")
         self.assertEqual(request["headers"]["Operator"], "123")
+        self.assertEqual(client.refresh_token, "new-refresh")
+        self.assertEqual(client.operator_id, 321)
+
+    def test_refresh_token_authentication_accepts_nested_token_response(self) -> None:
+        session = FakeSession(
+            FakeResponse(
+                {
+                    "data": {
+                        "accessToken": "new-access",
+                        "refreshToken": "new-refresh",
+                        "operatorId": 321,
+                    }
+                }
+            )
+        )
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            refresh_token="old-refresh",
+            operator_id=123,
+        )
+
+        asyncio.run(client.async_authenticate())
+
         self.assertEqual(client.refresh_token, "new-refresh")
         self.assertEqual(client.operator_id, 321)
 

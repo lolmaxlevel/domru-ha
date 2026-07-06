@@ -3,6 +3,25 @@ refresh_events:
   description: Принудительно обновить список событий из API Dom.ru
   fields: {}
 
+open_door:
+  name: Открыть дверь
+  description: Открыть домофонную дверь или калитку по ID точки доступа либо по индексу в списке access_controls
+  fields:
+    access_control_id:
+      name: ID точки доступа
+      description: ID access control из атрибутов Dom.ru. Если не указан, используется первая доступная точка.
+      required: false
+      selector:
+        text:
+    door_index:
+      name: Индекс двери
+      description: Номер точки доступа в списке access_controls, начиная с 0. Например, 1 откроет вторую дверь.
+      required: false
+      selector:
+        number:
+          min: 0
+          mode: box
+
 test_sip_call:
   name: Тест входящего SIP звонка
   description: Симулирует входящий SIP звонок для тестирования уведомлений и автоматизаций без реального звонка на домофон

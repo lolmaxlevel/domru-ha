@@ -45,7 +45,7 @@ from .const import (
 )
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
-from .door import async_open_first_door
+from .door import async_open_door
 from .sip import DomruSipClient
 
 if TYPE_CHECKING:
@@ -57,6 +57,7 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.SWITCH,
+    Platform.SELECT,
     Platform.BUTTON,
     Platform.CAMERA,
 ]
@@ -286,7 +287,15 @@ async def _async_courier_auto_open(
         if data.sip_client:
             data.sip_client.answer_and_hangup()
 
-        await async_open_first_door(data.client, data.coordinator)
+        selected_access_control_id = _selected_courier_access_control_id(
+            data.coordinator.data,
+            data.courier_auto_open_access_control_id,
+        )
+        await async_open_door(
+            data.client,
+            data.coordinator,
+            access_control_id=selected_access_control_id,
+        )
         await data.coordinator.async_request_refresh()
         LOGGER.info("Courier auto-open consumed successfully")
     except (DomruApiClientError, DomruApiClientCommunicationError):
@@ -378,6 +387,28 @@ def _generate_installation_id(instance_id: str) -> str:
             f"{format((int(h[16], 16) & 0x3) | 0x8, 'x')}{h[17:20]}-{h[20:32]}"
         )
     )
+
+
+def _selected_courier_access_control_id(
+    coordinator_data: dict[str, Any],
+    selected_access_control_id: str | int | None,
+) -> str | int | None:
+    """Return the selected courier door if it still exists."""
+    if selected_access_control_id is None:
+        return None
+
+    access_controls = coordinator_data.get("access_controls", [])
+    if not isinstance(access_controls, list):
+        return None
+
+    for access_control in access_controls:
+        if not isinstance(access_control, dict):
+            continue
+        access_control_id = access_control.get("id")
+        if str(access_control_id) == str(selected_access_control_id):
+            return access_control_id
+
+    return None
 
 
 async def async_unload_entry(

@@ -30,3 +30,4 @@ class DomruData:
     event_poller: asyncio.Task[None] | None = None
     courier_auto_open_enabled: bool = False
     courier_auto_open_in_progress: bool = False
+    courier_auto_open_access_control_id: str | int | None = None
