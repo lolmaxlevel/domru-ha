@@ -39,6 +39,7 @@ class FakeClient:
         self,
         access_control_id: str | int | None = None,
         place_id: str | int | None = None,
+        access_control: dict | None = None,  # noqa: ARG002
     ) -> dict[str, str]:
         self.opened_with = (access_control_id, place_id)
         return {"result": "ok"}

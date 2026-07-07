@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 
+from .camera_source import camera_sources_from_data
 from .entity import DomruEntity
 
 if TYPE_CHECKING:
@@ -32,30 +33,22 @@ async def async_setup_entry(
     if not coordinator.data:
         await coordinator.async_config_entry_first_refresh()
 
-    # Get cameras from coordinator data
-    cameras_data = coordinator.data.get("cameras", [])
-
-    entities = []
-    for camera_data in cameras_data:
-        # Support both formats: Go model (ID, Name) and old format (id, name)
-        camera_id = camera_data.get("ID") or camera_data.get("id")
-        camera_name = (
-            camera_data.get("Name") or camera_data.get("name") or f"Camera {camera_id}"
+    entities = [
+        DomruCamera(
+            coordinator=coordinator,
+            client=entry.runtime_data.client,
+            camera_id=source.get("camera_id"),
+            camera_name=source["name"],
+            camera_data=source["data"],
+            has_sound=source["has_sound"],
+            config_entry=entry,
+            unique_id_suffix=source["unique_id"],
+            snapshot_type=source["snapshot"],
+            place_id=source.get("place_id"),
+            access_control_id=source.get("access_control_id"),
         )
-        has_sound = camera_data.get("IsSound") == 1  # Check if camera has audio
-
-        if camera_id:  # Only add if we have an ID
-            entities.append(
-                DomruCamera(
-                    coordinator=coordinator,
-                    client=entry.runtime_data.client,
-                    camera_id=camera_id,
-                    camera_name=camera_name,
-                    camera_data=camera_data,
-                    has_sound=has_sound,
-                    config_entry=entry,
-                )
-            )
+        for source in camera_sources_from_data(coordinator.data)
+    ]
 
     async_add_entities(entities)
 
@@ -70,12 +63,16 @@ class DomruCamera(DomruEntity, Camera):
         self,
         coordinator: DomruDataUpdateCoordinator,
         client: DomruApiClient,
-        camera_id: str | int,
+        camera_id: str | int | None,
         camera_name: str,
         camera_data: dict,
         *,
         has_sound: bool = False,
         config_entry: DomruConfigEntry | None = None,
+        unique_id_suffix: str | None = None,
+        snapshot_type: str = "forpost",
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
     ) -> None:
         """Initialize the camera class."""
         super().__init__(coordinator)
@@ -84,7 +81,11 @@ class DomruCamera(DomruEntity, Camera):
         self._camera_data = camera_data
         self._has_sound = has_sound
         self._attr_name = camera_name
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{camera_id}"
+        self._snapshot_type = snapshot_type
+        self._place_id = place_id
+        self._access_control_id = access_control_id
+        unique_id = unique_id_suffix or f"camera_{camera_id}"
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{unique_id}"
         self._stream_url: str | None = None
         self._stream_url_time: float | None = None
 
@@ -118,6 +119,9 @@ class DomruCamera(DomruEntity, Camera):
 
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
+        if self._camera_id is None:
+            return None
+
         current_time = time.time()
 
         # If caching is disabled, always fetch fresh URL
@@ -174,6 +178,23 @@ class DomruCamera(DomruEntity, Camera):
         # или для получения thumbnail в UI
         _ = width, height  # Unused parameters
         try:
+            if (
+                self._snapshot_type == "access_control"
+                and self._place_id is not None
+                and self._access_control_id is not None
+            ):
+                _LOGGER.debug(
+                    "Fetching access control snapshot for %s",
+                    self._access_control_id,
+                )
+                return await self._client.async_get_access_control_snapshot(
+                    self._place_id,
+                    self._access_control_id,
+                )
+
+            if self._camera_id is None:
+                return None
+
             _LOGGER.debug("Fetching snapshot for camera %s", self._camera_id)
             return await self._client.async_get_camera_snapshot(self._camera_id)
         except Exception:  # pylint: disable=broad-except
@@ -185,6 +206,9 @@ class DomruCamera(DomruEntity, Camera):
         """Return extra state attributes."""
         return {
             "camera_id": self._camera_id,
+            "snapshot_type": self._snapshot_type,
+            "place_id": self._place_id,
+            "access_control_id": self._access_control_id,
             "has_sound": self._camera_data.get("IsSound") == 1,
             "is_active": self._camera_data.get("IsActive") == 1,
             "state": "online" if self._camera_data.get("State") == 1 else "offline",

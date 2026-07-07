@@ -12,8 +12,12 @@ from typing import Any
 from urllib.parse import quote, urljoin
 
 import aiohttp
-import async_timeout
 from aiohttp.client_exceptions import ClientConnectorError, ContentTypeError
+
+try:
+    from async_timeout import timeout as async_timeout
+except ModuleNotFoundError:
+    from asyncio import timeout as async_timeout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +40,49 @@ def _auth_value(data: dict[str, Any], *keys: str) -> Any:
         if key in data:
             return data[key]
     return None
+
+
+def _response_list(result: Any, *keys: str) -> list[dict[str, Any]]:
+    """Return a list of dicts from common API response wrappers."""
+    if isinstance(result, dict):
+        for key in keys:
+            value = result.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    return []
+
+
+def _dict_value(data: dict[str, Any], *keys: str) -> Any:
+    """Return the first present value from possible API key spellings."""
+    for key in keys:
+        if key in data:
+            return data[key]
+    return None
+
+
+def _place_from_subscriber_place(place_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the place object from v3 subscriber-place data."""
+    place = place_data.get("place", place_data)
+    return place if isinstance(place, dict) else None
+
+
+def _empty_sip_credentials() -> dict[str, str]:
+    """Return empty SIP credentials."""
+    return {"login": "", "password": "", "realm": ""}
+
+
+def _sip_credentials_from_response(result: Any) -> dict[str, str]:
+    """Return SIP credentials from an API response."""
+    if isinstance(result, dict):
+        data = result.get("data", result)
+        return {
+            "login": data.get("login", ""),
+            "password": data.get("password", ""),
+            "realm": data.get("realm", ""),
+        }
+    return _empty_sip_credentials()
 
 
 class DomruApiClientError(Exception):
@@ -290,31 +337,7 @@ class DomruApiClient:
 
         # Get subscriber places
         try:
-            places_response = await self.get_subscriber_places()
-
-            # Parse places according to Go model structure
-            # Response: {"data": [{"place": {...}, ...}]}
-            if places_response:
-                first_place_data = (
-                    places_response[0]
-                    if isinstance(places_response, list)
-                    else places_response
-                )
-
-                # Extract place object from the response
-                if isinstance(first_place_data, dict):
-                    place = first_place_data.get("place", first_place_data)
-                    data["places"] = [place]
-
-                    self._place_id = place.get("id")
-
-                    # Get access controls from place object
-                    access_controls = place.get("accessControls", [])
-                    data["access_controls"] = access_controls
-
-                    if access_controls and len(access_controls) > 0:
-                        device = access_controls[0]
-                        self._access_control_id = device.get("id")
+            await self._async_add_places_and_access_controls(data)
         except (
             DomruApiClientError,
             DomruApiClientCommunicationError,
@@ -324,8 +347,15 @@ class DomruApiClient:
 
         # Get cameras
         try:
-            cameras = await self.get_cameras()
-            data["cameras"] = cameras
+            cameras = []
+            for place in data["places"]:
+                place_id = place.get("id")
+                if place_id is None:
+                    continue
+                cameras.extend(
+                    await self.get_cameras(place_id=place_id, fallback=False)
+                )
+            data["cameras"] = cameras or await self.get_cameras()
         except (
             DomruApiClientError,
             DomruApiClientCommunicationError,
@@ -358,34 +388,97 @@ class DomruApiClient:
 
         return data
 
+    async def _async_add_places_and_access_controls(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+        """Populate places and access controls in coordinator data."""
+        places_response = await self.get_subscriber_places()
+        for place_data in places_response:
+            place = _place_from_subscriber_place(place_data)
+            if place is None:
+                continue
+
+            place_id = place.get("id")
+            data["places"].append(place)
+
+            if self._place_id is None and place_id is not None:
+                self._place_id = place_id
+
+            if place_id is None:
+                continue
+
+            access_controls = await self._async_get_place_access_controls(place_id)
+            for access_control in access_controls:
+                access_control.setdefault("placeId", place_id)
+                access_control.setdefault("place_id", place_id)
+            data["access_controls"].extend(access_controls)
+
+        if data["access_controls"]:
+            device = data["access_controls"][0]
+            self._access_control_id = device.get("id")
+
+    async def _async_get_place_access_controls(
+        self,
+        place_id: str | int,
+    ) -> list[dict[str, Any]]:
+        """Return access controls for a place without failing whole discovery."""
+        try:
+            return await self.get_access_controls(place_id)
+        except (
+            DomruApiClientError,
+            DomruApiClientCommunicationError,
+            TimeoutError,
+        ):
+            _LOGGER.debug("Failed to get access controls for place %s", place_id)
+            return []
+
     async def get_subscriber_places(self) -> list[dict[str, Any]]:
         """Get subscriber places (addresses)."""
-        url = urljoin(self.BASE_URL, "rest/v1/subscriberplaces")
+        url = urljoin(self.BASE_URL, "rest/v3/subscriber-places")
         result = await self._api_wrapper(url=url, method="GET")
 
-        # Handle different response formats
-        # Response: {"data": [{"place": {...}, ...}]}
-        if isinstance(result, dict):
-            places = result.get(
-                "data", result.get("subscriberPlaces", result.get("places", []))
-            )
-        else:
-            places = result if isinstance(result, list) else []
+        return _response_list(result, "data", "subscriberPlaces", "places")
 
-        return places if isinstance(places, list) else []
+    async def get_access_controls(
+        self,
+        place_id: str | int,
+    ) -> list[dict[str, Any]]:
+        """Get access controls for a place."""
+        url = urljoin(self.BASE_URL, f"rest/v1/places/{place_id}/accesscontrols")
+        result = await self._api_wrapper(url=url, method="GET")
 
-    async def get_cameras(self) -> list[dict[str, Any]]:
+        return _response_list(result, "data", "accessControls", "access_controls")
+
+    async def get_cameras(
+        self,
+        place_id: str | int | None = None,
+        *,
+        fallback: bool = True,
+    ) -> list[dict[str, Any]]:
         """Get cameras list."""
+        place = place_id or self._place_id
+        if place is not None:
+            url = urljoin(self.BASE_URL, f"rest/v1/places/{place}/cameras")
+            try:
+                result = await self._api_wrapper(url=url, method="GET")
+            except (
+                DomruApiClientError,
+                DomruApiClientCommunicationError,
+                TimeoutError,
+            ):
+                _LOGGER.debug("Failed to get place-scoped cameras for place %s", place)
+            else:
+                cameras = _response_list(result, "data", "cameras")
+                if cameras or not fallback:
+                    return cameras
+            if not fallback:
+                return []
+
         url = urljoin(self.BASE_URL, "rest/v1/forpost/cameras")
         result = await self._api_wrapper(url=url, method="GET")
 
-        # Handle different response formats
-        if isinstance(result, dict):
-            cameras = result.get("data", result.get("cameras", []))
-        else:
-            cameras = result if isinstance(result, list) else []
-
-        return cameras if isinstance(cameras, list) else []
+        return _response_list(result, "data", "cameras")
 
     async def get_finances(self) -> dict[str, Any]:
         """Get subscriber finances (balance, block status, etc)."""
@@ -402,6 +495,7 @@ class DomruApiClient:
         self,
         access_control_id: str | int | None = None,
         place_id: str | int | None = None,
+        access_control: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Open the door."""
         device_id = access_control_id or self._access_control_id
@@ -413,6 +507,36 @@ class DomruApiClient:
                 f"place_id={place})"
             )
             raise DomruApiClientError(msg)
+
+        if (
+            access_control
+            and _dict_value(access_control, "openMethod", "open_method") == "FORPOST"
+        ):
+            camera_id = _dict_value(
+                access_control,
+                "externalCameraId",
+                "external_camera_id",
+            )
+            external_device_id = _dict_value(
+                access_control,
+                "externalDeviceId",
+                "external_device_id",
+            )
+            if not camera_id or not external_device_id:
+                msg = "FORPOST access control is missing external camera or device ID"
+                raise DomruApiClientError(msg)
+
+            url = urljoin(
+                self.BASE_URL,
+                f"rest/v1/forpost/cameras/{camera_id}/devices/"
+                f"{external_device_id}/open",
+            )
+            result = await self._api_wrapper(
+                url=url,
+                method="POST",
+                headers={"X-Payment-PlaceId": str(place)},
+            )
+            return result.get("data", result) if isinstance(result, dict) else {}
 
         url = urljoin(
             self.BASE_URL, f"rest/v1/places/{place}/accesscontrols/{device_id}/actions"
@@ -426,10 +550,29 @@ class DomruApiClient:
         )
         return result.get("data", result)
 
+    async def async_open_entrance(
+        self,
+        place_id: str | int,
+        access_control_id: str | int,
+        entrance_id: str | int,
+    ) -> dict[str, Any]:
+        """Open a specific entrance on an access control."""
+        url = urljoin(
+            self.BASE_URL,
+            f"rest/v1/places/{place_id}/accesscontrols/{access_control_id}/"
+            f"entrances/{entrance_id}/actions",
+        )
+        result = await self._api_wrapper(
+            url=url,
+            method="POST",
+            json={"name": "accessControlOpen"},
+        )
+        return result.get("data", result) if isinstance(result, dict) else {}
+
     async def async_get_camera_snapshot(self, camera_id: str | int) -> bytes:
         """Get camera snapshot."""
         try:
-            async with async_timeout.timeout(10):
+            async with async_timeout(10):
                 url = urljoin(
                     self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/snapshots"
                 )
@@ -452,6 +595,40 @@ class DomruApiClient:
             raise DomruApiClientCommunicationError(msg) from exception
         except aiohttp.ClientError as exception:
             msg = f"Error fetching snapshot - {exception}"
+            raise DomruApiClientCommunicationError(msg) from exception
+
+    async def async_get_access_control_snapshot(
+        self,
+        place_id: str | int,
+        access_control_id: str | int,
+    ) -> bytes:
+        """Get an access control snapshot."""
+        try:
+            async with async_timeout(10):
+                url = urljoin(
+                    self.BASE_URL,
+                    f"rest/v1/places/{place_id}/accesscontrols/"
+                    f"{access_control_id}/videosnapshots",
+                )
+                response = await self._session.request(
+                    method="GET",
+                    url=url,
+                    headers=self._get_headers(),
+                )
+                if response.status == self.HTTP_UNAUTHORIZED:
+                    await self._set_access_token()
+                    response = await self._session.request(
+                        method="GET",
+                        url=url,
+                        headers=self._get_headers(),
+                    )
+                response.raise_for_status()
+                return await response.read()
+        except TimeoutError as exception:
+            msg = f"Timeout fetching access control snapshot - {exception}"
+            raise DomruApiClientCommunicationError(msg) from exception
+        except aiohttp.ClientError as exception:
+            msg = f"Error fetching access control snapshot - {exception}"
             raise DomruApiClientCommunicationError(msg) from exception
 
     async def async_get_camera_stream_url(self, camera_id: str | int) -> str:
@@ -514,7 +691,7 @@ class DomruApiClient:
         try:
             places_data = await self.get_subscriber_places()
             if not places_data:
-                return {"login": "", "password": "", "realm": ""}
+                return _empty_sip_credentials()
 
             # Extract place from response
             first_place_data = (
@@ -526,20 +703,21 @@ class DomruApiClient:
                 else {}
             )
 
-            # Try to find sipdevices URL
-            # The URL is typically in format: https://myhome.proptech.ru/rest/v1/places/{placeId}/accesscontrols/{deviceId}/sipdevices
             place_id = place.get("id")
-            access_controls = place.get("accessControls", [])
 
-            if not place_id or not access_controls:
-                return {"login": "", "password": "", "realm": ""}
+            if not place_id:
+                return _empty_sip_credentials()
+
+            access_controls = place.get("accessControls", [])
+            if not access_controls:
+                access_controls = await self.get_access_controls(place_id)
 
             # Get first access control device
-            device = access_controls[0]
+            device = access_controls[0] if access_controls else {}
             device_id = device.get("id")
 
             if not device_id:
-                return {"login": "", "password": "", "realm": ""}
+                return _empty_sip_credentials()
 
             # Build sipdevices URL
             url = urljoin(
@@ -555,21 +733,12 @@ class DomruApiClient:
                 json=json_data,
             )
 
-            # Response format: {"data": {"login": "...", "password": "...",
-            # "realm": "..."}}
-            if isinstance(result, dict):
-                data = result.get("data", result)
-                return {
-                    "login": data.get("login", ""),
-                    "password": data.get("password", ""),
-                    "realm": data.get("realm", ""),
-                }
-            return {"login": "", "password": "", "realm": ""}
+            return _sip_credentials_from_response(result)
 
         except Exception:  # pylint: disable=broad-except
             # Log error but don't fail setup
             _LOGGER.exception("Failed to get SIP credentials")
-            return {"login": "", "password": "", "realm": ""}
+            return _empty_sip_credentials()
 
     async def async_get_events(
         self, place_id: str | int, limit: int = 50
@@ -700,7 +869,7 @@ class DomruApiClient:
                     }
                 )
 
-                async with async_timeout.timeout(10):
+                async with async_timeout(10):
                     response = await self._session.request(
                         method=method,
                         url=url,
