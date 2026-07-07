@@ -41,10 +41,9 @@ This integration allows you to control your Dom.ru Smart Intercom (digital inter
 - **Sensor**: Balance, payment, block status, next payment date, and call status
 - **Button**: Open door, plus one button for each access control when multiple
   access controls are available
-- **Camera**: Intercom camera snapshots
-- **Binary Sensor**: Recent call and diagnostic connectivity status
+- **Camera**: Intercom camera snapshots, including access-control snapshots
 - **Switch**: Courier auto-open
-- **Diagnostic entities**: SIP status, camera/intercom availability, event count, and last event
+- **Diagnostic entities**: SIP status, event count, and last event
 
 ## Known issues
 
@@ -97,9 +96,16 @@ authentication using hashed credentials:
 - **Auth**: `POST /auth/v2/auth/{login}/password`
 - **Places**: `GET /rest/v3/subscriber-places`
 - **Access Controls**: `GET /rest/v1/places/{placeId}/accesscontrols`
-- **Cameras**: `GET /rest/v1/forpost/cameras`
+- **Cameras**: `GET /rest/v1/places/{placeId}/cameras`, with fallback to
+  `GET /rest/v1/forpost/cameras`
 - **Door Action**: `POST /rest/v1/places/{placeId}/accesscontrols/{deviceId}/actions`
-- **Snapshots**: `GET /rest/v1/forpost/cameras/{cameraId}/snapshots`
+- **FORPOST Door Action**:
+  `POST /rest/v1/forpost/cameras/{cameraId}/devices/{deviceId}/open`
+- **Entrance Door Action**:
+  `POST /rest/v1/places/{placeId}/accesscontrols/{deviceId}/entrances/{entranceId}/actions`
+- **Camera Snapshots**: `GET /rest/v1/forpost/cameras/{cameraId}/snapshots`
+- **Access Control Snapshots**:
+  `GET /rest/v1/places/{placeId}/accesscontrols/{deviceId}/videosnapshots`
 
 ## Troubleshooting
 

@@ -50,6 +50,8 @@ if "async_timeout" not in sys.modules:
     async_timeout_stub.timeout = timeout
     sys.modules["async_timeout"] = async_timeout_stub
 
+from aiohttp.client_exceptions import ContentTypeError
+
 API_MODULE_PATH = Path("custom_components/domru/api.py")
 spec = importlib.util.spec_from_file_location("domru_api_for_tests", API_MODULE_PATH)
 if spec is None or spec.loader is None:
@@ -59,6 +61,14 @@ sys.modules[spec.name] = api_module
 spec.loader.exec_module(api_module)
 
 DomruApiClient = api_module.DomruApiClient
+
+
+def _content_type_error() -> ContentTypeError:
+    """Return a ContentTypeError compatible with real aiohttp and test stubs."""
+    try:
+        return ContentTypeError(request_info=None, history=())
+    except TypeError:
+        return ContentTypeError()
 
 
 class FakeResponse:
@@ -177,7 +187,7 @@ class ApiPhoneLoginTests(unittest.TestCase):
             "subscriberId": 456,
         }
         session = FakeSession(
-            FakeResponse(None, json_exception=ContentTypeError(), text="")
+            FakeResponse(None, json_exception=_content_type_error(), text="")
         )
         client = DomruApiClient(username=None, password=None, session=session)
 
