@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json as jsonlib
 import logging
+import uuid
 from datetime import UTC, datetime
 from json.decoder import JSONDecodeError
 from typing import Any
@@ -19,7 +20,32 @@ try:
 except ModuleNotFoundError:
     from asyncio import timeout as async_timeout
 
+try:
+    from .const import (
+        ANDROID_APP_VERSION_CODE,
+        ANDROID_APP_VERSION_NAME,
+        ANDROID_DEVICE_MANUFACTURER,
+        ANDROID_DEVICE_MODEL,
+        ANDROID_OS_VERSION,
+    )
+except ImportError:  # pragma: no cover - standalone unit-test loading
+    ANDROID_APP_VERSION_CODE = "8090200"
+    ANDROID_APP_VERSION_NAME = "8.9.2"
+    ANDROID_DEVICE_MANUFACTURER = "Google"
+    ANDROID_DEVICE_MODEL = "sdk_gphone64_x86_64"
+    ANDROID_OS_VERSION = "14"
+
 _LOGGER = logging.getLogger(__name__)
+
+_DEVICE_INSTALLATIONS = (
+    "api/mh-customer-device/mobile/public/v1/customers/device-installations"
+)
+_SUBSCRIBER_NOTIFICATIONS = "rest/v1/subscriberNotifications"
+
+
+def _device_id(installation_id: str) -> str:
+    """Return a stable Android-like device ID for FCM registration."""
+    return uuid.uuid5(uuid.NAMESPACE_DNS, f"domru-fcm-{installation_id}").hex[:16]
 
 
 def _auth_response_data(result: Any) -> dict[str, Any]:
@@ -117,6 +143,7 @@ class DomruApiClient:
     HTTP_INTERNAL_ERROR = 500
     HTTP_OK = 200
     HTTP_CREATED = 201
+    HTTP_NO_CONTENT = 204
     # Error codes
     ERROR_TEMPORARY_CODE_FAILED = 6005
 
@@ -739,6 +766,66 @@ class DomruApiClient:
             # Log error but don't fail setup
             _LOGGER.exception("Failed to get SIP credentials")
             return _empty_sip_credentials()
+
+    def _push_registration_body(
+        self,
+        installation_id: str,
+        fcm_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the Android device payload used for push registration."""
+        body: dict[str, Any] = {
+            "appVersionCode": int(ANDROID_APP_VERSION_CODE),
+            "installationId": installation_id,
+            "appId": 2,
+            "appVersion": ANDROID_APP_VERSION_NAME,
+            "platform": "google",
+            "isDevelop": False,
+            "deviceManufacturer": ANDROID_DEVICE_MANUFACTURER,
+            "deviceModelName": ANDROID_DEVICE_MODEL,
+            "osVersion": ANDROID_OS_VERSION,
+            "deviceId": _device_id(installation_id),
+            "deviceType": "MOBILE_APPLICATION",
+        }
+        if fcm_token is not None:
+            body["pushToken"] = fcm_token
+        return body
+
+    async def register_push_device(
+        self,
+        fcm_token: str,
+        installation_id: str,
+    ) -> bool:
+        """Bind the generated FCM token to the Dom.ru account."""
+        body = self._push_registration_body(installation_id, fcm_token)
+        try:
+            for endpoint in (_DEVICE_INSTALLATIONS, _SUBSCRIBER_NOTIFICATIONS):
+                await self._api_wrapper(
+                    url=urljoin(self.BASE_URL, endpoint),
+                    method="POST",
+                    json=body,
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to register FCM push token", exc_info=True)
+            return False
+        return True
+
+    async def unregister_push_device(self, installation_id: str) -> bool:
+        """Remove this integration instance from push notifications."""
+        try:
+            await self._api_wrapper(
+                url=urljoin(self.BASE_URL, _SUBSCRIBER_NOTIFICATIONS),
+                method="DELETE",
+                json=self._push_registration_body(installation_id),
+                success_statuses=(
+                    self.HTTP_OK,
+                    self.HTTP_CREATED,
+                    self.HTTP_NO_CONTENT,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to unregister FCM push token", exc_info=True)
+            return False
+        return True
 
     async def async_get_events(
         self, place_id: str | int, limit: int = 50

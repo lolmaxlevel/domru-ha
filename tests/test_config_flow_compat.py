@@ -33,6 +33,13 @@ class ConfigFlowCompatibilityTests(unittest.TestCase):
         self.assertIn("client.refresh_token", source)
         self.assertIn("client.operator_id", source)
 
+    def test_sip_mode_defaults_to_fcm_on_demand(self) -> None:
+        config_flow = Path("custom_components/domru/config_flow.py").read_text()
+        setup = Path("custom_components/domru/__init__.py").read_text()
+
+        self.assertIn("CONF_SIP_MODE, DEFAULT_SIP_MODE", config_flow)
+        self.assertIn("CONF_SIP_MODE, DEFAULT_SIP_MODE", setup)
+
 
 if __name__ == "__main__":
     unittest.main()

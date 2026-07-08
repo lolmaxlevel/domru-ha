@@ -268,6 +268,39 @@ class ApiEndpointTests(unittest.TestCase):
         )
         self.assertEqual(client.requests[2]["json"], {"installationId": "install-1"})
 
+    def test_register_push_device_mirrors_android_device_installation(self) -> None:
+        client = CapturingClient()
+
+        result = asyncio.run(client.register_push_device("fcm-token", "install-1"))
+
+        self.assertTrue(result)
+        self.assertEqual(
+            [request["method"] for request in client.requests],
+            ["POST", "POST"],
+        )
+        self.assertIn(
+            "api/mh-customer-device/mobile/public/v1/customers/device-installations",
+            client.requests[0]["url"],
+        )
+        self.assertIn("rest/v1/subscriberNotifications", client.requests[1]["url"])
+        body = client.requests[0]["json"]
+        self.assertEqual(body["installationId"], "install-1")
+        self.assertEqual(body["pushToken"], "fcm-token")
+        self.assertEqual(body["platform"], "google")
+        self.assertEqual(body["deviceType"], "MOBILE_APPLICATION")
+
+    def test_unregister_push_device_omits_push_token(self) -> None:
+        client = CapturingClient()
+
+        result = asyncio.run(client.unregister_push_device("install-1"))
+
+        self.assertTrue(result)
+        request = client.requests[0]
+        self.assertEqual(request["method"], "DELETE")
+        self.assertIn("rest/v1/subscriberNotifications", request["url"])
+        self.assertEqual(request["json"]["installationId"], "install-1")
+        self.assertNotIn("pushToken", request["json"])
+
 
 if __name__ == "__main__":
     unittest.main()

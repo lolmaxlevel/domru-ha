@@ -461,6 +461,32 @@ class DomruSipClientTests(SipTestCase):
         self.assertTrue(client.is_registered)
         self.assertEqual(transport.sent, [])
 
+    def test_on_demand_fcm_register_unregisters_when_no_invite_arrives(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+
+        client.register_for_incoming_call(unregister_delay=0.1)
+
+        self.assertTrue(transport.sent[-1][0].startswith("REGISTER "))
+        self.assertTrue(self.active_scheduled_handles())
+
+        client._registered = True
+        self.loop.run_until_complete(asyncio.sleep(0.2))
+
+        unregister = transport.sent[-1][0]
+        self.assertIn("REGISTER sip:5676.spb.domofon.domru.ru SIP/2.0", unregister)
+        self.assertIn("Expires: 0\r\n", unregister)
+        self.assertFalse(client.is_registered)
+
     def test_udp_connection_lost_marks_client_not_running(self) -> None:
         client, _transport = self.make_client()
         client._registered = True

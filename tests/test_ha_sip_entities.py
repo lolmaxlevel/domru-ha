@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import unittest
@@ -26,9 +27,22 @@ class FakeSipClient:
     def __init__(self, status: str = "idle") -> None:
         self.call_status = status
         self.dismissed = False
+        self.answered_and_hung_up = False
+        self.registered_now = False
+        self.registered_for_incoming_call = False
 
     def hangup_call(self) -> bool:
         self.dismissed = True
+        return True
+
+    def register_now(self) -> None:
+        self.registered_now = True
+
+    def register_for_incoming_call(self) -> None:
+        self.registered_for_incoming_call = True
+
+    def answer_and_hangup(self) -> bool:
+        self.answered_and_hung_up = True
         return True
 
     def get_active_call_info(self) -> dict[str, str]:
@@ -69,6 +83,42 @@ class SipEntityHelperTests(unittest.TestCase):
         self.assertTrue(sip_entities.dismiss_call(client))
         self.assertTrue(client.dismissed)
         self.assertFalse(sip_entities.dismiss_call(None))
+
+    def test_answer_and_hangup_when_ready_uses_active_call_immediately(self) -> None:
+        client = FakeSipClient("ringing")
+
+        result = asyncio.run(sip_entities.async_answer_and_hangup_when_ready(client))
+
+        self.assertTrue(result)
+        self.assertTrue(client.answered_and_hung_up)
+        self.assertFalse(client.registered_now)
+
+    def test_answer_and_hangup_when_ready_registers_and_waits_for_fcm_invite(
+        self,
+    ) -> None:
+        client = FakeSipClient("idle")
+
+        async def make_call_ring() -> None:
+            await asyncio.sleep(0)
+            client.call_status = "ringing"
+
+        async def run() -> bool:
+            task = asyncio.create_task(make_call_ring())
+            try:
+                return await sip_entities.async_answer_and_hangup_when_ready(
+                    client,
+                    wait_timeout=0.2,
+                    poll_interval=0,
+                )
+            finally:
+                await task
+
+        result = asyncio.run(run())
+
+        self.assertTrue(result)
+        self.assertFalse(client.registered_now)
+        self.assertTrue(client.registered_for_incoming_call)
+        self.assertTrue(client.answered_and_hung_up)
 
 
 if __name__ == "__main__":

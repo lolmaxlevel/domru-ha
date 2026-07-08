@@ -30,8 +30,7 @@ from .const import (
     CONF_SIP_LOCAL_IP,
     CONF_SIP_LOCAL_PORT,
     CONF_SIP_MODE,
-    CONF_SIP_POLL_INTERVAL,
-    DEFAULT_SIP_POLL_INTERVAL,
+    DEFAULT_SIP_MODE,
     DOMAIN,
     LOGGER,
     SIP_MODE_ON_DEMAND,
@@ -458,7 +457,7 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SIP_MODE,
                         default=self._config_entry.options.get(
-                            CONF_SIP_MODE, SIP_MODE_PERSISTENT
+                            CONF_SIP_MODE, DEFAULT_SIP_MODE
                         ),
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
@@ -468,24 +467,11 @@ class DomruOptionsFlowHandler(config_entries.OptionsFlow):
                                     "value": SIP_MODE_PERSISTENT,
                                 },
                                 {
-                                    "label": "По запросу (через polling событий)",
+                                    "label": "По запросу (через FCM push)",
                                     "value": SIP_MODE_ON_DEMAND,
                                 },
                             ],
                             mode=selector.SelectSelectorMode.DROPDOWN,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_SIP_POLL_INTERVAL,
-                        default=self._config_entry.options.get(
-                            CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=1,
-                            max=60,
-                            step=1,
-                            unit_of_measurement="seconds",
                         ),
                     ),
                     vol.Optional(

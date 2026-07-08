@@ -26,6 +26,7 @@ REGISTER_RETRY_DELAY = 5.0
 ON_DEMAND_UNREGISTER_DELAY = 5.0
 MAX_AUTH_FAILURES = 2
 DEFAULT_CALL_TIMEOUT = 30.0
+DEFAULT_FCM_REGISTER_HOLD = 35.0
 DEFAULT_RTP_PORT = 10000
 DEFAULT_RTCP_PORT = 39996
 USER_AGENT = "Myhome/Myhome-android"
@@ -524,6 +525,19 @@ class DomruSipClient:
     def re_register(self) -> None:
         """Force a fresh SIP registration."""
         self.register_now(force=True)
+
+    def register_for_incoming_call(
+        self,
+        *,
+        unregister_delay: float = DEFAULT_FCM_REGISTER_HOLD,
+    ) -> None:
+        """Register for an FCM-notified call and unregister if no INVITE arrives."""
+        self.register_now()
+        if self._registration_mode != "on_demand":
+            return
+        if unregister_delay <= 0:
+            return
+        self._schedule_delayed_unregister(unregister_delay)
 
     def answer_call(self) -> bool:
         """Answer the current ringing call with 200 OK and SDP."""
@@ -1138,13 +1152,13 @@ class DomruSipClient:
         if self._registration_mode == "on_demand" and self._registered:
             self._schedule_delayed_unregister()
 
-    def _schedule_delayed_unregister(self) -> None:
+    def _schedule_delayed_unregister(self, delay: float | None = None) -> None:
         """Schedule delayed unregister for on-demand SIP mode."""
         self._cancel_delayed_unregister()
-        delay = self._on_demand_unregister_delay_seconds
-        _LOGGER.debug("Scheduling SIP unregister in %.1fs", delay)
+        unregister_delay = delay or self._on_demand_unregister_delay_seconds
+        _LOGGER.debug("Scheduling SIP unregister in %.1fs", unregister_delay)
         self._delayed_unregister_timer = self._loop().call_later(
-            delay,
+            unregister_delay,
             self._run_delayed_unregister,
         )
 

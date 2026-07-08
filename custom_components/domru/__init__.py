@@ -34,19 +34,19 @@ from .const import (
     CONF_SIP_LOCAL_IP,
     CONF_SIP_LOCAL_PORT,
     CONF_SIP_MODE,
-    CONF_SIP_POLL_INTERVAL,
-    DEFAULT_SIP_POLL_INTERVAL,
+    DEFAULT_SIP_MODE,
     DOMAIN,
     LOGGER,
     SIGNAL_CALL_STATUS_UPDATE,
     SIGNAL_COURIER_AUTO_OPEN_UPDATE,
     SIP_MODE_ON_DEMAND,
-    SIP_MODE_PERSISTENT,
 )
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .door import async_open_door
+from .fcm import DomruFcmListener
 from .sip import DomruSipClient
+from .sip_entities import async_answer_and_hangup_when_ready
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -91,7 +91,10 @@ async def async_setup_entry(
 
     # Initialize SIP client for incoming calls
     sip_client = None
+    fcm_listener = None
     event_poller: asyncio.Task[None] | None = None
+    instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
+    installation_id = _generate_installation_id(instance_id)
 
     # Check if SIP is enabled in options (default: True)
     sip_enabled = entry.options.get(CONF_SIP_ENABLED, True)
@@ -100,7 +103,12 @@ async def async_setup_entry(
         LOGGER.info("SIP is disabled in options")
     else:
         try:
-            sip_client, event_poller = await _setup_sip(hass, entry, client)
+            sip_client, event_poller = await _setup_sip(
+                hass,
+                entry,
+                client,
+                installation_id,
+            )
         except (
             DomruApiClientError,
             DomruApiClientCommunicationError,
@@ -114,8 +122,14 @@ async def async_setup_entry(
         integration=async_get_loaded_integration(hass, entry.domain),
         coordinator=coordinator,
         sip_client=sip_client,
+        fcm_listener=fcm_listener,
         event_poller=event_poller,
     )
+
+    if sip_enabled:
+        fcm_listener = _setup_fcm_listener(hass, entry, client, installation_id)
+        entry.runtime_data.fcm_listener = fcm_listener
+        hass.async_create_task(fcm_listener.async_start())
 
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
     await coordinator.async_config_entry_first_refresh()
@@ -166,16 +180,13 @@ async def _setup_sip(
     hass: HomeAssistant,
     entry: DomruConfigEntry,
     client: DomruApiClient,
+    installation_id: str,
 ) -> tuple[DomruSipClient | None, asyncio.Task[None] | None]:
     """
     Set up SIP client and optional event poller.
 
     Returns (sip_client, event_poller_task).
     """
-    # Generate installation ID from Home Assistant instance ID
-    instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
-    installation_id = _generate_installation_id(instance_id)
-
     LOGGER.info("Getting SIP credentials with installation_id: %s", installation_id)
 
     # Get SIP credentials
@@ -206,9 +217,7 @@ async def _setup_sip(
     local_ip = entry.options.get(CONF_SIP_LOCAL_IP) or None
     sip_host_ip = entry.options.get(CONF_SIP_HOST_IP) or None
     local_port = entry.options.get(CONF_SIP_LOCAL_PORT, 5060)
-    sip_mode = entry.options.get(CONF_SIP_MODE, SIP_MODE_PERSISTENT)
-    poll_interval = entry.options.get(CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL)
-
+    sip_mode = entry.options.get(CONF_SIP_MODE, DEFAULT_SIP_MODE)
     if local_ip == "":
         local_ip = None
     if sip_host_ip == "":
@@ -266,15 +275,57 @@ async def _setup_sip(
     await sip_client.start()
     LOGGER.info("SIP client started successfully (mode: %s)", sip_mode)
 
-    # In on-demand mode, start event poller to detect incoming calls
     event_poller = None
     if sip_mode == SIP_MODE_ON_DEMAND:
-        event_poller = asyncio.create_task(
-            _poll_events_loop(hass, client, sip_client, poll_interval)
-        )
-        LOGGER.info("Event poller started (interval: %d seconds)", poll_interval)
+        LOGGER.info("SIP on-demand mode will register when an FCM call push arrives")
 
     return sip_client, event_poller
+
+
+def _setup_fcm_listener(
+    hass: HomeAssistant,
+    entry: DomruConfigEntry,
+    client: DomruApiClient,
+    installation_id: str,
+) -> DomruFcmListener:
+    """Set up the FCM listener that triggers SIP registration on call pushes."""
+
+    def on_fcm_event(event: dict[str, Any]) -> None:
+        """Handle normalized FCM doorbell events."""
+        event_type = event.get("event_type")
+        attributes = event.get("attributes") or {}
+        data = getattr(entry, "runtime_data", None)
+        sip_client = getattr(data, "sip_client", None) if data else None
+
+        LOGGER.info("FCM doorbell event: %s - %s", event_type, event)
+        if event_type == "ring":
+            if sip_client:
+                sip_client.register_for_incoming_call()
+            hass.bus.async_fire(
+                f"{DOMAIN}_incoming_call",
+                {
+                    "from": attributes.get("gate_name") or "FCM",
+                    "call_id": attributes.get("call_id") or "",
+                    "source": "fcm",
+                    "place_id": event.get("place_id", ""),
+                    "access_control_id": event.get("access_control_id", ""),
+                },
+            )
+            _schedule_courier_auto_open(hass, entry)
+        elif event_type == "ended":
+            if sip_client:
+                sip_client.hangup_call()
+            hass.bus.async_fire(f"{DOMAIN}_call_ended", {"source": "fcm"})
+
+        async_dispatcher_send(hass, SIGNAL_CALL_STATUS_UPDATE)
+
+    return DomruFcmListener(
+        hass,
+        entry,
+        client,
+        installation_id,
+        on_event=on_fcm_event,
+    )
 
 
 def _schedule_courier_auto_open(
@@ -301,7 +352,7 @@ async def _async_courier_auto_open(
     data = entry.runtime_data
     try:
         if data.sip_client:
-            data.sip_client.answer_and_hangup()
+            await async_answer_and_hangup_when_ready(data.sip_client)
 
         selected_access_control_id = _selected_courier_access_control_id(
             data.coordinator.data,
@@ -323,75 +374,6 @@ async def _async_courier_auto_open(
         data.courier_auto_open_in_progress = False
         async_dispatcher_send(hass, SIGNAL_CALL_STATUS_UPDATE)
         async_dispatcher_send(hass, SIGNAL_COURIER_AUTO_OPEN_UPDATE)
-
-
-async def _poll_events_loop(
-    hass: HomeAssistant,
-    client: DomruApiClient,
-    sip_client: DomruSipClient,
-    interval: int,
-) -> None:
-    """
-    Poll API events to detect incoming calls for on-demand SIP.
-
-    When a call event is detected, triggers immediate SIP registration
-    so the server can route the INVITE to us.
-    """
-    last_event_id: str | None = None
-    call_event_types = {
-        "accessControlCallAccepted",
-        "accessControlCallRejected",
-        "accessControlCallMissed",
-        "accessControlCallIncoming",
-    }
-
-    LOGGER.info("Event polling loop started (interval=%ds)", interval)
-
-    while True:
-        try:
-            await asyncio.sleep(interval)
-
-            # Skip if HA is shutting down
-            if hass.is_stopping:
-                break
-
-            # Don't poll if already in a call
-            if sip_client.call_status != "idle":
-                continue
-
-            # Fetch latest events
-            events = await client.async_get_events(
-                client._place_id,  # noqa: SLF001
-                limit=5,
-            )
-
-            if not events:
-                continue
-
-            latest = events[0]
-            event_id = str(latest.get("id", ""))
-            event_type = latest.get("eventTypeName", "")
-
-            # Check if this is a new call-related event
-            if event_id and event_id != last_event_id:
-                last_event_id = event_id
-
-                if event_type in call_event_types:
-                    LOGGER.info(
-                        "Detected call event via API: %s (id=%s), "
-                        "triggering SIP registration",
-                        event_type,
-                        event_id,
-                    )
-                    sip_client.register_now()
-
-        except asyncio.CancelledError:
-            LOGGER.info("Event polling loop cancelled")
-            break
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Error in event polling loop", exc_info=True)
-            # Continue polling even on errors
-            await asyncio.sleep(interval)
 
 
 def _generate_installation_id(instance_id: str) -> str:
@@ -432,6 +414,14 @@ async def async_unload_entry(
     entry: DomruConfigEntry,
 ) -> bool:
     """Handle removal of an entry."""
+    if entry.runtime_data.fcm_listener:
+        await entry.runtime_data.fcm_listener.async_stop()
+        LOGGER.info("FCM listener stopped")
+
+        instance_id = hass.data.get("core.uuid") or entry.entry_id
+        installation_id = _generate_installation_id(instance_id)
+        await entry.runtime_data.client.unregister_push_device(installation_id)
+
     # Cancel event poller if running
     if entry.runtime_data.event_poller:
         entry.runtime_data.event_poller.cancel()
