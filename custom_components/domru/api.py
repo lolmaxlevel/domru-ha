@@ -846,6 +846,10 @@ class DomruApiClient:
         """Handle a request-specific 400 Bad Request error."""
         raise DomruApiClientError(message)
 
+    def _handle_authentication_error(self, message: str) -> None:
+        """Handle a request-specific authentication error."""
+        raise DomruApiClientAuthenticationError(message)
+
     async def _parse_response(
         self,
         response: aiohttp.ClientResponse,
@@ -920,7 +924,7 @@ class DomruApiClient:
                         self._handle_server_error(json_response)
 
                     if status_messages and response.status in status_messages:
-                        raise DomruApiClientAuthenticationError(
+                        self._handle_authentication_error(
                             status_messages[response.status]
                         )
 

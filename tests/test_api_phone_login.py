@@ -413,9 +413,7 @@ class ApiPhoneLoginTests(unittest.TestCase):
             api_module.DomruApiClientAuthenticationError,
             "Invalid SMS code format",
         ):
-            asyncio.run(
-                client.async_confirm_phone_code("+79991112233", "x", account)
-            )
+            asyncio.run(client.async_confirm_phone_code("+79991112233", "x", account))
 
     def test_refresh_token_authentication_does_not_require_password(self) -> None:
         session = FakeSession(
