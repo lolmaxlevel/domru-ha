@@ -125,6 +125,7 @@ class DomruApiClient:
         username: str | None,
         password: str | None,
         session: aiohttp.ClientSession,
+        access_token: str | None = None,
         refresh_token: str | None = None,
         operator_id: str | int | None = None,
     ) -> None:
@@ -132,7 +133,7 @@ class DomruApiClient:
         self._username = username
         self._password = password
         self._session = session
-        self._access_token: str | None = None
+        self._access_token = access_token
         self._refresh_token = refresh_token
         self._operator_id = operator_id
         self._place_id: str | None = None
@@ -140,6 +141,11 @@ class DomruApiClient:
         # Hash parameters from go-impl/pkg/auth/password.go
         self._hash2_prefix = "DigitalHomeNTK"
         self._secret = "789sdgHJs678wertv34712376"  # noqa: S105
+
+    @property
+    def access_token(self) -> str | None:
+        """Return the current access token."""
+        return self._access_token
 
     @property
     def refresh_token(self) -> str | None:
@@ -173,6 +179,9 @@ class DomruApiClient:
 
     async def _set_access_token(self) -> None:
         """Set access token using login/password or refresh token."""
+        if self._access_token is not None:
+            return
+
         if self._refresh_token is not None and self._operator_id is not None:
             # Try to refresh token first
             try:

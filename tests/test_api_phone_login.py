@@ -127,6 +127,23 @@ class FakeSession:
 class ApiPhoneLoginTests(unittest.TestCase):
     """Phone login request behavior."""
 
+    def test_stored_access_token_authentication_makes_no_refresh_request(
+        self,
+    ) -> None:
+        session = FakeSession()
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            access_token="sms-token",
+            refresh_token="sms-token",
+            operator_id=123,
+        )
+
+        asyncio.run(client.async_authenticate())
+
+        self.assertEqual(session.requests, [])
+
     def test_get_phone_accounts_escapes_phone_number(self) -> None:
         session = FakeSession(FakeResponse([{"accountId": "account-1"}]))
         client = DomruApiClient(username=None, password=None, session=session)

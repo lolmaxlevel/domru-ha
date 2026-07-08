@@ -30,8 +30,15 @@ class ConfigFlowCompatibilityTests(unittest.TestCase):
     def test_phone_flow_stores_normalized_client_tokens(self) -> None:
         source = Path("custom_components/domru/config_flow.py").read_text()
 
+        self.assertIn("client.access_token", source)
         self.assertIn("client.refresh_token", source)
         self.assertIn("client.operator_id", source)
+
+    def test_setup_reuses_access_token_for_existing_phone_entries(self) -> None:
+        source = Path("custom_components/domru/__init__.py").read_text()
+
+        self.assertIn("entry.data.get(CONF_ACCESS_TOKEN)", source)
+        self.assertIn("or entry.data.get(CONF_REFRESH_TOKEN)", source)
 
 
 if __name__ == "__main__":
