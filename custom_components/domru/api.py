@@ -267,9 +267,17 @@ class DomruApiClient:
             method="GET",
             authenticated=False,
             success_statuses=(self.HTTP_OK, 300),
+            status_messages={
+                204: "Phone number is not registered.",
+                self.HTTP_BAD_REQUEST: "Invalid phone number or login.",
+            },
         )
 
-        return result if isinstance(result, list) else []
+        accounts = result if isinstance(result, list) else []
+        if not accounts:
+            msg = "Password authentication is required for this account."
+            raise DomruApiClientAuthenticationError(msg)
+        return accounts
 
     async def async_request_phone_confirmation(
         self,
@@ -284,6 +292,9 @@ class DomruApiClient:
             method="POST",
             json=account,
             authenticated=False,
+            status_messages={
+                429: "Too many SMS requests. Try again later.",
+            },
         )
 
     async def async_confirm_phone_code(
@@ -311,6 +322,9 @@ class DomruApiClient:
             json=json_data,
             authenticated=False,
             bad_request_message="SMS code is wrong. Try again.",
+            status_messages={
+                406: "Invalid SMS code format.",
+            },
         )
         auth_data = _auth_response_data(result)
 
@@ -863,9 +877,11 @@ class DomruApiClient:
         authenticated: bool = True,
         success_statuses: tuple[int, ...] | None = None,
         bad_request_message: str | None = None,
+        status_messages: dict[int, str] | None = None,
     ) -> Any:
         """Make an API request with automatic token refresh on 401."""
         allowed_statuses = success_statuses or (self.HTTP_OK, self.HTTP_CREATED)
+        parse_statuses = (*allowed_statuses, *(status_messages or {}))
         while True:
             try:
                 headers_to_use = headers or (
@@ -893,7 +909,7 @@ class DomruApiClient:
 
                     json_response = await self._parse_response(
                         response,
-                        allowed_statuses,
+                        parse_statuses,
                     )
 
                     # Check for error responses
@@ -902,6 +918,11 @@ class DomruApiClient:
 
                     if response.status == self.HTTP_INTERNAL_ERROR:
                         self._handle_server_error(json_response)
+
+                    if status_messages and response.status in status_messages:
+                        raise DomruApiClientAuthenticationError(
+                            status_messages[response.status]
+                        )
 
                     if response.status == self.HTTP_BAD_REQUEST and bad_request_message:
                         self._handle_bad_request_error(bad_request_message)

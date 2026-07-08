@@ -164,6 +164,36 @@ class ApiPhoneLoginTests(unittest.TestCase):
 
         self.assertEqual(accounts, [{"accountId": "account-1"}])
 
+    def test_get_phone_accounts_reports_unregistered_phone(self) -> None:
+        session = FakeSession(FakeResponse(None, status=204))
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "Phone number is not registered",
+        ):
+            asyncio.run(client.async_get_phone_accounts("+79991112233"))
+
+    def test_get_phone_accounts_reports_invalid_login(self) -> None:
+        session = FakeSession(FakeResponse({"error": "invalid_login"}, status=400))
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "Invalid phone number or login",
+        ):
+            asyncio.run(client.async_get_phone_accounts("+79991112233"))
+
+    def test_get_phone_accounts_reports_password_flow(self) -> None:
+        session = FakeSession(FakeResponse([], status=200))
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "Password authentication is required",
+        ):
+            asyncio.run(client.async_get_phone_accounts("+79991112233"))
+
     def test_request_phone_confirmation_posts_selected_account(self) -> None:
         account = {
             "accountId": "account-1",
@@ -211,6 +241,23 @@ class ApiPhoneLoginTests(unittest.TestCase):
         asyncio.run(client.async_request_phone_confirmation("+79991112233", account))
 
         self.assertEqual(len(session.requests), 1)
+
+    def test_request_phone_confirmation_reports_rate_limit(self) -> None:
+        account = {
+            "accountId": "account-1",
+            "operatorId": 123,
+            "subscriberId": 456,
+        }
+        session = FakeSession(FakeResponse({"error": "limit_exceeded"}, status=429))
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "Too many SMS requests. Try again later",
+        ):
+            asyncio.run(
+                client.async_request_phone_confirmation("+79991112233", account)
+            )
 
     def test_confirm_phone_code_posts_confirmation_and_stores_tokens(self) -> None:
         account = {
@@ -352,6 +399,23 @@ class ApiPhoneLoginTests(unittest.TestCase):
 
         self.assertIsNone(client.refresh_token)
         self.assertIsNone(client.operator_id)
+
+    def test_confirm_phone_code_http_406_reports_invalid_format(self) -> None:
+        account = {
+            "accountId": "account-1",
+            "operatorId": 123,
+            "subscriberId": 456,
+        }
+        session = FakeSession(FakeResponse({"error": "invalid_format"}, status=406))
+        client = DomruApiClient(username=None, password=None, session=session)
+
+        with self.assertRaisesRegex(
+            api_module.DomruApiClientAuthenticationError,
+            "Invalid SMS code format",
+        ):
+            asyncio.run(
+                client.async_confirm_phone_code("+79991112233", "x", account)
+            )
 
     def test_refresh_token_authentication_does_not_require_password(self) -> None:
         session = FakeSession(
