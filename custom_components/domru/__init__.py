@@ -27,6 +27,7 @@ from .api import (
     DomruApiClientError,
 )
 from .const import (
+    CONF_ACCESS_TOKEN,
     CONF_OPERATOR_ID,
     CONF_REFRESH_TOKEN,
     CONF_SIP_ENABLED,
@@ -72,6 +73,9 @@ async def async_setup_entry(
         username=entry.data.get(CONF_USERNAME),
         password=entry.data.get(CONF_PASSWORD),
         session=async_get_clientsession(hass),
+        access_token=(
+            entry.data.get(CONF_ACCESS_TOKEN) or entry.data.get(CONF_REFRESH_TOKEN)
+        ),
         refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
         operator_id=entry.data.get(CONF_OPERATOR_ID),
     )
