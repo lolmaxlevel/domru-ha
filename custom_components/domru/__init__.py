@@ -27,6 +27,7 @@ from .api import (
     DomruApiClientError,
 )
 from .const import (
+    CONF_ACCESS_TOKEN,
     CONF_OPERATOR_ID,
     CONF_REFRESH_TOKEN,
     CONF_SIP_ENABLED,
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
-    Platform.BINARY_SENSOR,
     Platform.SWITCH,
     Platform.SELECT,
     Platform.BUTTON,
@@ -73,6 +73,9 @@ async def async_setup_entry(
         username=entry.data.get(CONF_USERNAME),
         password=entry.data.get(CONF_PASSWORD),
         session=async_get_clientsession(hass),
+        access_token=(
+            entry.data.get(CONF_ACCESS_TOKEN) or entry.data.get(CONF_REFRESH_TOKEN)
+        ),
         refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
         operator_id=entry.data.get(CONF_OPERATOR_ID),
     )
@@ -122,6 +125,7 @@ async def async_setup_entry(
     await coordinator.async_config_entry_first_refresh()
 
     _remove_legacy_event_entity(hass, entry)
+    _remove_legacy_binary_sensor_entities(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
@@ -144,6 +148,22 @@ def _remove_legacy_event_entity(
     )
     if entity_id:
         entity_registry.async_remove(entity_id)
+
+
+def _remove_legacy_binary_sensor_entities(
+    hass: HomeAssistant,
+    entry: DomruConfigEntry,
+) -> None:
+    """Remove binary sensors that are no longer exposed."""
+    entity_registry = er.async_get(hass)
+    for key in ("has_cameras", "has_access_controls", "recent_call"):
+        entity_id = entity_registry.async_get_entity_id(
+            Platform.BINARY_SENSOR,
+            DOMAIN,
+            f"{entry.entry_id}_{key}",
+        )
+        if entity_id:
+            entity_registry.async_remove(entity_id)
 
 
 async def _setup_sip(

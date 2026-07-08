@@ -13,6 +13,7 @@ CONF_CAMERA_STREAM_CACHE_TIME = "camera_stream_cache_time"
 CONF_AUTH_METHOD = "auth_method"
 CONF_PHONE = "phone"
 CONF_ACCOUNT_ID = "account_id"
+CONF_ACCESS_TOKEN = "access_token"  # noqa: S105
 CONF_REFRESH_TOKEN = "refresh_token"  # noqa: S105
 CONF_OPERATOR_ID = "operator_id"
 CONF_SIP_ENABLED = "sip_enabled"

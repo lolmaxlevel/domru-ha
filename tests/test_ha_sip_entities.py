@@ -43,6 +43,11 @@ class FakeSipClient:
 class SipEntityHelperTests(unittest.TestCase):
     """SIP helper behavior for HA platform wrappers."""
 
+    def test_call_and_door_buttons_are_control_entities(self) -> None:
+        source = Path("custom_components/domru/button.py").read_text()
+
+        self.assertNotIn("entity_category=EntityCategory.CONFIG", source)
+
     def test_button_keys_are_open_and_dismiss_only(self) -> None:
         self.assertEqual(
             sip_entities.SIP_BUTTON_KEYS,
