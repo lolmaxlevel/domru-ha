@@ -288,7 +288,8 @@ def _setup_fcm_listener(
     client: DomruApiClient,
     installation_id: str,
 ) -> DomruFcmListener:
-    """Set up the FCM listener that triggers SIP registration on call pushes."""
+    """Set up the FCM listener and its one-shot SIP push binding."""
+    fcm_listener: DomruFcmListener | None = None
 
     def on_fcm_event(event: dict[str, Any]) -> None:
         """Handle normalized FCM doorbell events."""
@@ -300,7 +301,12 @@ def _setup_fcm_listener(
         LOGGER.info("FCM doorbell event: %s - %s", event_type, event)
         if event_type == "ring":
             if sip_client:
-                sip_client.register_for_incoming_call()
+                call_id = str(attributes.get("call_id") or "")
+                fcm_token = fcm_listener.fcm_token if fcm_listener else None
+                sip_client.register_for_incoming_call(
+                    call_id=call_id or None,
+                    fcm_token=fcm_token,
+                )
             hass.bus.async_fire(
                 f"{DOMAIN}_incoming_call",
                 {
@@ -315,17 +321,27 @@ def _setup_fcm_listener(
         elif event_type == "ended":
             if sip_client:
                 sip_client.hangup_call()
+                sip_client.end_on_demand_session()
             hass.bus.async_fire(f"{DOMAIN}_call_ended", {"source": "fcm"})
 
         async_dispatcher_send(hass, SIGNAL_CALL_STATUS_UPDATE)
 
-    return DomruFcmListener(
+    def on_fcm_token_ready(fcm_token: str) -> None:
+        """Prebind the push Contact once without enabling periodic SIP refresh."""
+        data = getattr(entry, "runtime_data", None)
+        sip_client = getattr(data, "sip_client", None) if data else None
+        if sip_client:
+            sip_client.install_fcm_push_binding(fcm_token)
+
+    fcm_listener = DomruFcmListener(
         hass,
         entry,
         client,
         installation_id,
         on_event=on_fcm_event,
+        on_token_ready=on_fcm_token_ready,
     )
+    return fcm_listener
 
 
 def _schedule_courier_auto_open(

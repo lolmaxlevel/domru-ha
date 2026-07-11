@@ -13,6 +13,8 @@ __pycache__
 coverage.xml
 .ruff_cache
 .idea
+# SIP captures may contain credentials and FCM tokens.
+dev/sip_records/
 *.pcap
 *.pcapng
 snapshot.jpg

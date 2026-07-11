@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from contextlib import suppress
 from datetime import timedelta
@@ -47,6 +48,12 @@ FCM_WATCHDOG_INTERVAL = timedelta(minutes=2)
 _PUSH_TYPE_EVENT = {
     "CALL_INCOMING": "ring",
     "CALL_END_ANSWERED_MOBILE": "ended",
+    "CALL_END_UNKNOWN": "ended",
+}
+
+_PUSH_TYPE_END_REASON = {
+    "CALL_END_ANSWERED_MOBILE": "answered_elsewhere",
+    "CALL_END_UNKNOWN": "unknown",
 }
 
 
@@ -67,7 +74,7 @@ def fcm_event_from_notification(notification: dict[str, Any]) -> dict[str, Any] 
         "call_invalidated": data.get("CallInvalidated"),
     }
     if event_type == "ended":
-        attributes["reason"] = "answered_elsewhere"
+        attributes["reason"] = _PUSH_TYPE_END_REASON.get(push_type, "unknown")
 
     return {
         "event_type": event_type,
@@ -87,6 +94,7 @@ class DomruFcmListener:
         api: DomruApiClient,
         installation_id: str,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        on_token_ready: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the listener."""
         self._hass = hass
@@ -94,15 +102,19 @@ class DomruFcmListener:
         self._api = api
         self._installation_id = installation_id
         self._on_event = on_event
+        self._on_token_ready = on_token_ready
         self._client: Any = None
         self._watchdog_unsub: Callable[[], None] | None = None
+        self._connect_lock = asyncio.Lock()
         self._reconnecting = False
+        self._stopped = True
         self.fcm_token: str | None = None
 
     async def async_start(self) -> None:
         """Connect to FCM and start watchdog checks."""
+        self._stopped = False
         await self._async_connect()
-        if self._watchdog_unsub is None:
+        if not self._stopped and self._watchdog_unsub is None:
             self._watchdog_unsub = async_track_time_interval(
                 self._hass,
                 self._async_watchdog,
@@ -111,6 +123,14 @@ class DomruFcmListener:
 
     async def _async_connect(self) -> None:
         """Create the FCM client, register the token, and start receiving pushes."""
+        async with self._connect_lock:
+            await self._async_connect_locked()
+
+    async def _async_connect_locked(self) -> None:  # noqa: PLR0911
+        """Create the FCM client while holding the connection lock."""
+        if self._stopped:
+            return
+
         try:
             firebase_messaging = await self._hass.async_add_executor_job(
                 importlib.import_module,
@@ -123,7 +143,19 @@ class DomruFcmListener:
             )
             return
 
+        if self._stopped:
+            return
+
         try:
+            credentials = self._entry.data.get(CONF_FCM_CREDENTIALS)
+            LOGGER.info(
+                "FCM firebase-messaging module loaded module=%s version=%s "
+                "file=%s stored_credentials=%s",
+                getattr(firebase_messaging, "__name__", "firebase_messaging"),
+                getattr(firebase_messaging, "__version__", "unknown"),
+                getattr(firebase_messaging, "__file__", "unknown"),
+                "yes" if credentials else "no",
+            )
             register_config = firebase_messaging.FcmRegisterConfig(
                 project_id=FCM_PROJECT_ID,
                 app_id=FCM_APP_ID,
@@ -131,7 +163,6 @@ class DomruFcmListener:
                 messaging_sender_id=FCM_SENDER_ID,
                 bundle_id=FCM_BUNDLE_ID,
             )
-            credentials = self._entry.data.get(CONF_FCM_CREDENTIALS)
             client = firebase_messaging.FcmPushClient(
                 self._on_notification,
                 register_config,
@@ -150,22 +181,49 @@ class DomruFcmListener:
                     getattr(firebase_messaging, "__file__", "unknown"),
                 )
                 return
+            self._client = client
             fcm_token = await client.checkin_or_register()
+            if self._stopped:
+                with suppress(Exception):
+                    await client.stop()
+                return
+
+            self._client = client
             self.fcm_token = fcm_token
-            if not await self._api.register_push_device(
+            LOGGER.info(
+                "FCM check-in returned token token_length=%d",
+                len(fcm_token),
+            )
+            token_registered = await self._api.register_push_device(
                 fcm_token,
                 self._installation_id,
-            ):
+            )
+            if token_registered:
+                LOGGER.info("FCM push token registration succeeded")
+            else:
                 LOGGER.warning("FCM push token registration failed")
+            if self._stopped:
+                with suppress(Exception):
+                    await client.stop()
+                return
+
             await client.start()
-            self._client = client
+            if self._stopped:
+                with suppress(Exception):
+                    await client.stop()
+                return
+
             LOGGER.info("FCM intercom listener started")
+            if token_registered and self._on_token_ready:
+                self._on_token_ready(fcm_token)
         except Exception as err:  # noqa: BLE001
             LOGGER.warning("Failed to start FCM listener: %s", err, exc_info=True)
             self._client = None
 
     async def _async_watchdog(self, _now: Any = None) -> None:
         """Reconnect if the FCM receiver is no longer active."""
+        if self._stopped:
+            return
         if self._reconnecting:
             return
         client = self._client
@@ -189,6 +247,7 @@ class DomruFcmListener:
 
     async def async_stop(self) -> None:
         """Stop watchdog checks and close the FCM connection."""
+        self._stopped = True
         if self._watchdog_unsub is not None:
             self._watchdog_unsub()
             self._watchdog_unsub = None

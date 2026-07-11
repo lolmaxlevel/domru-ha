@@ -65,8 +65,13 @@ class FakeEntry:
 class FakeApi:
     """Minimal API for FCM listener tests."""
 
-    async def register_push_device(self, _token: str, _installation_id: str) -> bool:
-        return True
+    def __init__(self, *, result: bool = True) -> None:
+        self.result = result
+        self.registered_tokens: list[tuple[str, str]] = []
+
+    async def register_push_device(self, token: str, installation_id: str) -> bool:
+        self.registered_tokens.append((token, installation_id))
+        return self.result
 
 
 class FakeFirebaseMessaging:
@@ -126,6 +131,92 @@ class FakeRaceFirebaseMessaging:
         return cls.client
 
 
+class FakeSuccessClient:
+    """FCM client fake for successful startup logging."""
+
+    def __init__(self) -> None:
+        self.started = False
+
+    async def checkin_or_register(self) -> str:
+        return "fcm-token"
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        return None
+
+    def is_started(self) -> bool:
+        return self.started
+
+
+class FakeSuccessFirebaseMessaging:
+    """Firebase module fake that returns a working client."""
+
+    __version__ = "test-version"
+    __file__ = "firebase_messaging.py"
+    client: FakeSuccessClient | None = None
+
+    class FcmRegisterConfig:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class FcmPushClientConfig:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    @classmethod
+    def FcmPushClient(cls, *_args, **_kwargs):
+        cls.client = FakeSuccessClient()
+        return cls.client
+
+
+class FakeSlowClient:
+    """FCM client fake that lets tests stop the listener during check-in."""
+
+    def __init__(self) -> None:
+        self.checkin_started = asyncio.Event()
+        self.checkin_can_finish = asyncio.Event()
+        self.started = False
+        self.stopped = False
+
+    async def checkin_or_register(self) -> str:
+        self.checkin_started.set()
+        await self.checkin_can_finish.wait()
+        return "fcm-token"
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def is_started(self) -> bool:
+        return self.started
+
+
+class FakeSlowFirebaseMessaging:
+    """Firebase module fake for stop-while-starting lifecycle tests."""
+
+    client: FakeSlowClient | None = None
+    client_ready: asyncio.Event | None = None
+
+    class FcmRegisterConfig:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class FcmPushClientConfig:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    @classmethod
+    def FcmPushClient(cls, *_args, **_kwargs):
+        cls.client = FakeSlowClient()
+        if cls.client_ready is not None:
+            cls.client_ready.set()
+        return cls.client
+
+
 class FcmPayloadTests(unittest.TestCase):
     """FCM payload parsing behavior."""
 
@@ -156,6 +247,12 @@ class FcmPayloadTests(unittest.TestCase):
 
         self.assertEqual(event["event_type"], "ended")
         self.assertEqual(event["attributes"]["reason"], "answered_elsewhere")
+
+    def test_unknown_call_end_push_maps_to_ended_event(self) -> None:
+        event = fcm_event_from_notification({"data": {"PushType": "CALL_END_UNKNOWN"}})
+
+        self.assertEqual(event["event_type"], "ended")
+        self.assertEqual(event["attributes"]["reason"], "unknown")
 
     def test_unknown_push_type_is_ignored(self) -> None:
         self.assertIsNone(fcm_event_from_notification({"data": {"PushType": "OTHER"}}))
@@ -202,6 +299,89 @@ class FcmPayloadTests(unittest.TestCase):
         self.assertEqual(listener.fcm_token, "fcm-token")
         self.assertIs(FakeRaceFirebaseMessaging.client, listener._client)
         self.assertTrue(FakeRaceFirebaseMessaging.client.started)
+
+    def test_fcm_start_logs_startup_checkpoints(self) -> None:
+        sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+        listener = DomruFcmListener(FakeHass(), FakeEntry(), FakeApi(), "install-1")
+
+        try:
+            with self.assertLogs(fcm_module.LOGGER, level="INFO") as logs:
+                asyncio.run(listener.async_start())
+        finally:
+            sys.modules.pop("firebase_messaging", None)
+
+        output = "\n".join(logs.output)
+        self.assertIn("FCM firebase-messaging module loaded", output)
+        self.assertIn("stored_credentials=no", output)
+        self.assertIn("FCM check-in returned token", output)
+        self.assertIn("token_length=9", output)
+        self.assertIn("FCM push token registration succeeded", output)
+        self.assertIn("FCM intercom listener started", output)
+
+    def test_fcm_start_notifies_when_push_token_is_ready(self) -> None:
+        sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+        received_tokens = []
+        listener = DomruFcmListener(
+            FakeHass(),
+            FakeEntry(),
+            FakeApi(),
+            "install-1",
+            on_token_ready=received_tokens.append,
+        )
+
+        try:
+            asyncio.run(listener.async_start())
+        finally:
+            sys.modules.pop("firebase_messaging", None)
+
+        self.assertEqual(received_tokens, ["fcm-token"])
+
+    def test_fcm_start_logs_push_registration_failure(self) -> None:
+        sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+        listener = DomruFcmListener(
+            FakeHass(),
+            FakeEntry(),
+            FakeApi(result=False),
+            "install-1",
+        )
+
+        try:
+            with self.assertLogs(fcm_module.LOGGER, level="WARNING") as logs:
+                asyncio.run(listener.async_start())
+        finally:
+            sys.modules.pop("firebase_messaging", None)
+
+        self.assertIn("FCM push token registration failed", "\n".join(logs.output))
+
+    def test_fcm_stop_during_checkin_does_not_start_or_register_client(self) -> None:
+        async def run() -> tuple[DomruFcmListener, FakeApi, FakeSlowClient]:
+            sys.modules["firebase_messaging"] = FakeSlowFirebaseMessaging
+            FakeSlowFirebaseMessaging.client = None
+            FakeSlowFirebaseMessaging.client_ready = asyncio.Event()
+            api = FakeApi()
+            listener = DomruFcmListener(FakeHass(), FakeEntry(), api, "install-1")
+
+            try:
+                start_task = asyncio.create_task(listener.async_start())
+                await FakeSlowFirebaseMessaging.client_ready.wait()
+                client = FakeSlowFirebaseMessaging.client
+                await client.checkin_started.wait()
+
+                await listener.async_stop()
+                client.checkin_can_finish.set()
+                await start_task
+                return listener, api, client
+            finally:
+                sys.modules.pop("firebase_messaging", None)
+                FakeSlowFirebaseMessaging.client = None
+                FakeSlowFirebaseMessaging.client_ready = None
+
+        listener, api, client = asyncio.run(run())
+
+        self.assertIsNone(listener.fcm_token)
+        self.assertEqual(api.registered_tokens, [])
+        self.assertFalse(client.started)
+        self.assertTrue(client.stopped)
 
 
 if __name__ == "__main__":

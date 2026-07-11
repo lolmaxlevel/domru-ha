@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,10 +27,11 @@ REGISTER_RETRY_DELAY = 5.0
 ON_DEMAND_UNREGISTER_DELAY = 5.0
 MAX_AUTH_FAILURES = 2
 DEFAULT_CALL_TIMEOUT = 30.0
-DEFAULT_FCM_REGISTER_HOLD = 35.0
+DEFAULT_FCM_REGISTER_HOLD = 20.0
 DEFAULT_RTP_PORT = 10000
 DEFAULT_RTCP_PORT = 39996
 USER_AGENT = "Myhome/Myhome-android"
+SIP_PUSH_APP_ID = "com.novotelecom.domophone"
 MIN_STATUS_PARTS = 2
 MIN_CSEQ_PARTS = 2
 SIP_STATUS_OK = 200
@@ -198,9 +200,16 @@ class SipMessage:
 
     def to_redacted_text(self) -> str:
         """Serialize a log-safe form of the SIP message."""
+        safe_start_line = re.sub(
+            r"pn-tok=[^;>\s]+",
+            "pn-tok=<redacted>",
+            self.start_line,
+        )
         header_lines = []
         for name, value in self.headers:
             key = _header_key(name)
+            if key == "content-length":
+                continue
             if key in SECRET_HEADERS:
                 header_lines.append(f"{name}: <redacted>")
                 continue
@@ -209,10 +218,11 @@ class SipMessage:
                 r'\1="<redacted>"',
                 value,
             )
+            safe = re.sub(r"pn-tok=[^;>\s]+", "pn-tok=<redacted>", safe)
             header_lines.append(f"{name}: {safe}")
         header_lines.append(f"Content-Length: {len(self.body.encode('utf-8'))}")
         return (
-            self.start_line
+            safe_start_line
             + "\r\n"
             + "\r\n".join(header_lines)
             + "\r\n\r\n"
@@ -342,6 +352,10 @@ class DomruSipClient:
         self._expires = DEFAULT_REGISTER_EXPIRES
         self._registered = False
         self._registered_contact_uri = ""
+        self._unregister_cseq: str | None = None
+        self._push_call_id: str | None = None
+        self._push_token: str | None = None
+        self._push_binding_pending = False
         self._register_timer: asyncio.TimerHandle | None = None
         self._register_response_timer: asyncio.TimerHandle | None = None
         self._register_retry_timer: asyncio.TimerHandle | None = None
@@ -349,6 +363,7 @@ class DomruSipClient:
         self._register_response_timeout_seconds = REGISTER_RESPONSE_TIMEOUT
         self._register_retry_delay_seconds = REGISTER_RETRY_DELAY
         self._on_demand_unregister_delay_seconds = ON_DEMAND_UNREGISTER_DELAY
+        self._on_demand_session_active = False
         self._auth_failure = 0
         self._last_nonce = ""
 
@@ -530,14 +545,72 @@ class DomruSipClient:
         self,
         *,
         unregister_delay: float = DEFAULT_FCM_REGISTER_HOLD,
+        call_id: str | None = None,
+        fcm_token: str | None = None,
     ) -> None:
         """Register for an FCM-notified call and unregister if no INVITE arrives."""
-        self.register_now()
+        previous_call_id = self._push_call_id
+        is_duplicate_fcm_call = bool(
+            call_id
+            and call_id == previous_call_id
+            and self._register_response_timer is not None
+        )
+        if call_id and fcm_token:
+            self._push_call_id = call_id
+            self._push_token = fcm_token
+        elif call_id:
+            _LOGGER.warning("FCM call %s arrived without an FCM token", call_id)
+        self._on_demand_session_active = True
+        if is_duplicate_fcm_call:
+            _LOGGER.debug(
+                "Ignoring duplicate FCM call %s while SIP registration is pending",
+                call_id,
+            )
+            if self._registration_mode == "on_demand" and unregister_delay > 0:
+                self._schedule_delayed_unregister(unregister_delay)
+            return
+
+        self.register_now(force=bool(call_id and call_id != previous_call_id))
         if self._registration_mode != "on_demand":
             return
         if unregister_delay <= 0:
             return
         self._schedule_delayed_unregister(unregister_delay)
+
+    def install_fcm_push_binding(self, fcm_token: str) -> None:
+        """
+        Install one FCM-aware SIP binding without scheduling a refresh.
+
+        Linphone prepares the account's push Contact before receiving a push.
+        We mirror that with a single REGISTER so the registrar has the FCM
+        route, but leave refreshing to an actual FCM-notified call.
+        """
+        if self._registration_mode != "on_demand":
+            return
+        if not fcm_token:
+            return
+        if not self._running:
+            _LOGGER.warning("Cannot install SIP FCM push binding before SIP starts")
+            return
+
+        self._push_token = fcm_token
+        self._push_call_id = None
+        self.register_now(force=True)
+        self._push_binding_pending = True
+
+    def end_on_demand_session(self) -> None:
+        """Stop SIP activity associated with the current FCM call notification."""
+        if self._registration_mode != "on_demand":
+            return
+
+        self._on_demand_session_active = False
+        self._cancel_register_timers()
+        self._cancel_delayed_unregister()
+        if self._registered:
+            _LOGGER.info("Ending on-demand SIP registration after FCM call end")
+            self._send_unregister()
+        elif self._unregister_cseq is None:
+            self._clear_push_contact()
 
     def answer_call(self) -> bool:
         """Answer the current ringing call with 200 OK and SDP."""
@@ -643,6 +716,8 @@ class DomruSipClient:
         self._cseq = 1
         self._expires = DEFAULT_REGISTER_EXPIRES
         self._registered = False
+        self._unregister_cseq = None
+        self._push_binding_pending = False
         self._auth_failure = 0
         self._last_nonce = ""
         self._cancel_register_response_timer()
@@ -711,7 +786,8 @@ class DomruSipClient:
             (
                 "Contact",
                 f"<sip:{self.username}@{self.local_ip}:{self.local_port};"
-                f'transport=udp>;+sip.instance="<urn:uuid:{instance_id}>"',
+                f"transport=udp{self._push_contact_parameters()}>;"
+                f'+sip.instance="<urn:uuid:{instance_id}>"',
             ),
             ("User-Agent", USER_AGENT),
             ("Supported", "replaces, outbound, gruu, path"),
@@ -723,6 +799,20 @@ class DomruSipClient:
             f"REGISTER sip:{self.realm} SIP/2.0",
             headers,
         )
+
+    def _push_contact_parameters(self) -> str:
+        """Return official-app SIP push parameters for an FCM call registration."""
+        if not self._push_token:
+            return ""
+        parameters = f";app-id={SIP_PUSH_APP_ID};pn-type=google"
+        if self._push_call_id:
+            call_id = quote(self._push_call_id, safe="-_.!~*'()[]/:&+$")
+            parameters += f";Call-Id:%20{call_id}"
+        return f"{parameters};pn-tok={self._push_token}"
+
+    def _clear_push_contact(self) -> None:
+        """Forget call-specific push routing data after a SIP session ends."""
+        self._push_call_id = None
 
     def _send_register(self, authorization: str | None = None) -> None:
         """Send REGISTER to the SIP server."""
@@ -747,6 +837,7 @@ class DomruSipClient:
         self._cancel_register_timers()
         self._cancel_delayed_unregister()
         self._cseq += 1
+        self._unregister_cseq = str(self._cseq)
         self._send_to_server(self._build_register(expires=0))
         self._registered = False
 
@@ -777,6 +868,13 @@ class DomruSipClient:
 
     def _handle_register_challenge(self, message: SipMessage) -> None:
         """Respond to REGISTER 401 challenge."""
+        if (
+            self._registration_mode == "on_demand"
+            and not self._on_demand_session_active
+            and not self._push_binding_pending
+        ):
+            _LOGGER.debug("Ignoring SIP REGISTER challenge after on-demand call ended")
+            return
         challenge_header = message.first_header(
             "WWW-Authenticate"
         ) or message.first_header("Proxy-Authenticate")
@@ -811,6 +909,14 @@ class DomruSipClient:
 
     def _handle_register_ok(self, message: SipMessage) -> None:
         """Handle successful REGISTER."""
+        if message.cseq_number == self._unregister_cseq:
+            self._unregister_cseq = None
+            self._expires = 0
+            self._registered = False
+            self._clear_push_contact()
+            _LOGGER.info("SIP unregistered successfully")
+            return
+
         contact = message.first_header("Contact")
         pub_gruu = re.search(r'pub-gruu="([^"]+)"', contact, flags=re.IGNORECASE)
         if pub_gruu:
@@ -839,18 +945,47 @@ class DomruSipClient:
         self._last_error = None
         self._last_registered_at = self._now()
         self._last_event = "registered"
-        _LOGGER.info(
-            "SIP registration succeeded expires=%ds contact=%s next_refresh_in=%ss",
-            self._expires,
-            self._registered_contact_uri or "-",
-            max(self._expires - RE_REGISTER_MARGIN, 1),
-        )
+        if self._push_binding_pending:
+            self._push_binding_pending = False
+            self._registered = False
+            self._cancel_register_timers()
+            _LOGGER.info(
+                "SIP FCM push binding installed expires=%ds without refresh",
+                self._expires,
+            )
+            return
+        if (
+            self._registration_mode == "on_demand"
+            and not self._on_demand_session_active
+        ):
+            _LOGGER.info("SIP registration completed after FCM call end; unregistering")
+            self._send_unregister()
+            return
+        if self._registration_mode == "on_demand":
+            _LOGGER.info(
+                "SIP registration succeeded expires=%ds contact=%s "
+                "for the active on-demand call",
+                self._expires,
+                self._registered_contact_uri or "-",
+            )
+        else:
+            _LOGGER.info(
+                "SIP registration succeeded expires=%ds contact=%s next_refresh_in=%ss",
+                self._expires,
+                self._registered_contact_uri or "-",
+                max(self._expires - RE_REGISTER_MARGIN, 1),
+            )
         self._emit_event("registered", expires=self._expires)
         self._schedule_register()
 
     def _schedule_register(self) -> None:
         """Schedule re-registration before expiry."""
         if not self._running:
+            return
+        if (
+            self._registration_mode == "on_demand"
+            and not self._on_demand_session_active
+        ):
             return
         if self._register_timer:
             self._register_timer.cancel()
@@ -882,6 +1017,11 @@ class DomruSipClient:
         self._register_response_timer = None
         if not self._running:
             return
+        if (
+            self._registration_mode == "on_demand"
+            and not self._on_demand_session_active
+        ):
+            return
 
         self._registered = False
         self._record_error("registration response timeout")
@@ -896,6 +1036,11 @@ class DomruSipClient:
     def _schedule_register_retry(self) -> None:
         """Schedule a fresh registration attempt after a failed REGISTER."""
         if not self._running:
+            return
+        if (
+            self._registration_mode == "on_demand"
+            and not self._on_demand_session_active
+        ):
             return
         self._cancel_register_retry_timer()
         delay = self._register_retry_delay_seconds
@@ -1149,7 +1294,11 @@ class DomruSipClient:
         self._pending_hangup_after_ack = False
         _LOGGER.info("SIP call cleared call_id=%s", call_id)
         self._emit_event("call_ended")
-        if self._registration_mode == "on_demand" and self._registered:
+        if (
+            self._registration_mode == "on_demand"
+            and self._on_demand_session_active
+            and self._registered
+        ):
             self._schedule_delayed_unregister()
 
     def _schedule_delayed_unregister(self, delay: float | None = None) -> None:
@@ -1165,9 +1314,9 @@ class DomruSipClient:
     def _run_delayed_unregister(self) -> None:
         """Run a scheduled on-demand unregister."""
         self._delayed_unregister_timer = None
-        if self._running and self._registered:
-            _LOGGER.debug("Running delayed SIP unregister for on-demand mode")
-            self._send_unregister()
+        if self._running:
+            _LOGGER.debug("Ending expired on-demand SIP registration")
+            self.end_on_demand_session()
 
     def _cancel_call_timer(self) -> None:
         """Cancel the active call timeout."""
@@ -1265,13 +1414,13 @@ class DomruSipClient:
         addr: tuple[str, int],
     ) -> None:
         """Log a redacted SIP wire message."""
+        redacted_message = message.to_redacted_text().strip()
         _LOGGER.debug(
-            "%s SIP %s:%d %s\n%s",
+            "%s SIP %s:%d\n%s",
             direction,
             addr[0],
             addr[1],
-            message.start_line,
-            message.to_redacted_text().strip(),
+            redacted_message,
         )
 
     @staticmethod
