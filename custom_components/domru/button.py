@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
-from homeassistant.const import EntityCategory
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .access_control import access_control_label, valid_access_controls
@@ -28,13 +27,11 @@ ENTITY_DESCRIPTIONS = (
         key="open_door",
         name="Open Door",
         icon="mdi:door",
-        entity_category=EntityCategory.CONFIG,
     ),
     ButtonEntityDescription(
         key="dismiss_call",
         name="Dismiss Call",
         icon="mdi:phone-off",
-        entity_category=EntityCategory.CONFIG,
     ),
 )
 
@@ -88,7 +85,6 @@ def _access_control_button_description(
         key=f"open_door_{access_control_id}",
         name=f"Open {name}",
         icon="mdi:door-open",
-        entity_category=EntityCategory.CONFIG,
     )
 
 

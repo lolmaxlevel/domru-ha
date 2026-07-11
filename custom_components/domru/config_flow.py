@@ -18,6 +18,7 @@ from .api import (
 from .const import (
     AUTH_METHOD_PASSWORD,
     AUTH_METHOD_PHONE,
+    CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
     CONF_AUTH_METHOD,
     CONF_CAMERA_STREAM_CACHE,
@@ -276,7 +277,7 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input["sms_code"],
                     self._selected_account,
                 )
-                refresh_token, operator_id = _phone_auth_tokens(client)
+                access_token, refresh_token, operator_id = _phone_auth_tokens(client)
             except DomruApiClientAuthenticationError as exception:
                 LOGGER.warning(exception)
                 self._last_error_message = _error_message(exception)
@@ -298,6 +299,7 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_AUTH_METHOD: AUTH_METHOD_PHONE,
                         CONF_PHONE: self._phone,
                         CONF_ACCOUNT_ID: self._selected_account.get("accountId"),
+                        CONF_ACCESS_TOKEN: access_token,
                         CONF_REFRESH_TOKEN: refresh_token,
                         CONF_OPERATOR_ID: operator_id,
                     },
@@ -403,14 +405,15 @@ def _description_placeholders(message: str | None) -> dict[str, str]:
     return {"error_message": message or ""}
 
 
-def _phone_auth_tokens(client: DomruApiClient) -> tuple[str, str | int]:
+def _phone_auth_tokens(client: DomruApiClient) -> tuple[str, str, str | int]:
     """Return stored phone-login tokens or raise a config-flow auth error."""
+    access_token = client.access_token
     refresh_token = client.refresh_token
     operator_id = client.operator_id
-    if not refresh_token or operator_id is None:
-        msg = "No refresh token or operator ID in phone confirmation"
+    if not access_token or not refresh_token or operator_id is None:
+        msg = "Incomplete credentials in phone confirmation"
         raise DomruApiClientAuthenticationError(msg)
-    return refresh_token, operator_id
+    return access_token, refresh_token, operator_id
 
 
 class DomruOptionsFlowHandler(config_entries.OptionsFlow):
