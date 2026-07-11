@@ -327,6 +327,8 @@ class DomruSipClient:
         rtp_port: int = DEFAULT_RTP_PORT,
         rtcp_port: int = DEFAULT_RTCP_PORT,
         server_ip: str | None = None,
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
     ) -> None:
         """Initialize the SIP client."""
         self.realm = realm
@@ -341,6 +343,10 @@ class DomruSipClient:
         self._rtcp_port = rtcp_port
         self._server_ip = server_ip
         self._server_addr = (server_ip or realm, SIP_SERVER_PORT)
+        self._place_id = str(place_id) if place_id is not None else None
+        self._access_control_id = (
+            str(access_control_id) if access_control_id is not None else None
+        )
 
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: SipProtocol | None = None
@@ -540,6 +546,28 @@ class DomruSipClient:
     def re_register(self) -> None:
         """Force a fresh SIP registration."""
         self.register_now(force=True)
+
+    def matches_access_control(
+        self,
+        place_id: str | int | None,
+        access_control_id: str | int | None,
+    ) -> bool:
+        """Return whether an FCM event belongs to this SIP client."""
+        return (
+            self._place_id is not None
+            and self._access_control_id is not None
+            and str(place_id) == self._place_id
+            and str(access_control_id) == self._access_control_id
+        )
+
+    def is_current_fcm_call(self, call_id: str | None) -> bool:
+        """Return whether an FCM end event belongs to the current call session."""
+        if not call_id:
+            return False
+        current_call_id = (
+            self._active_call.call_id if self._active_call else self._push_call_id
+        )
+        return current_call_id is not None and call_id == current_call_id
 
     def register_for_incoming_call(
         self,

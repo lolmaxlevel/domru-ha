@@ -549,6 +549,28 @@ class DomruSipClientTests(SipTestCase):
             register,
         )
 
+    def test_fcm_events_are_scoped_to_the_sip_access_control(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            place_id="place-1",
+            access_control_id="door-1",
+        )
+
+        self.assertTrue(client.matches_access_control("place-1", "door-1"))
+        self.assertFalse(client.matches_access_control("place-1", "door-2"))
+        self.assertFalse(client.matches_access_control("place-2", "door-1"))
+
+    def test_fcm_end_must_match_the_active_call_id(self) -> None:
+        client, _ = self.make_client()
+        client._push_call_id = "new-call"
+
+        self.assertTrue(client.is_current_fcm_call("new-call"))
+        self.assertFalse(client.is_current_fcm_call("old-call"))
+        self.assertFalse(client.is_current_fcm_call(None))
+
     def test_fcm_push_prebind_does_not_schedule_reregistration(self) -> None:
         client = DomruSipClient(
             realm="5676.spb.domofon.domru.ru",

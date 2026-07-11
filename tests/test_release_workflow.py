@@ -1,4 +1,4 @@
-# ruff: noqa: D102
+# ruff: noqa: D102,S101
 """Tests for GitHub release workflow version selection."""
 
 import unittest

@@ -273,6 +273,8 @@ async def _setup_sip(
         on_call_callback=on_call_callback,
         registration_mode=sip_mode,
         server_ip=sip_host_ip,
+        place_id=client._place_id,  # noqa: SLF001
+        access_control_id=client._access_control_id,  # noqa: SLF001
     )
 
     # Start SIP client
@@ -301,10 +303,22 @@ def _setup_fcm_listener(
         attributes = event.get("attributes") or {}
         data = getattr(entry, "runtime_data", None)
         sip_client = getattr(data, "sip_client", None) if data else None
+        sip_target_matches = bool(
+            sip_client
+            and sip_client.matches_access_control(
+                event.get("place_id"),
+                event.get("access_control_id"),
+            )
+        )
 
-        LOGGER.info("FCM doorbell event: %s - %s", event_type, event)
+        LOGGER.info(
+            "FCM doorbell event type=%s place_id=%s access_control_id=%s",
+            event_type,
+            event.get("place_id"),
+            event.get("access_control_id"),
+        )
         if event_type == "ring":
-            if sip_client:
+            if sip_target_matches:
                 call_id = str(attributes.get("call_id") or "")
                 fcm_token = fcm_listener.fcm_token if fcm_listener else None
                 sip_client.register_for_incoming_call(
@@ -321,12 +335,22 @@ def _setup_fcm_listener(
                     "access_control_id": event.get("access_control_id", ""),
                 },
             )
-            _schedule_courier_auto_open(hass, entry)
+            if sip_target_matches:
+                _schedule_courier_auto_open(hass, entry)
         elif event_type == "ended":
-            if sip_client:
+            call_id = str(attributes.get("call_id") or "")
+            if sip_target_matches and sip_client.is_current_fcm_call(call_id):
                 sip_client.hangup_call()
                 sip_client.end_on_demand_session()
-            hass.bus.async_fire(f"{DOMAIN}_call_ended", {"source": "fcm"})
+            hass.bus.async_fire(
+                f"{DOMAIN}_call_ended",
+                {
+                    "source": "fcm",
+                    "call_id": call_id,
+                    "place_id": event.get("place_id", ""),
+                    "access_control_id": event.get("access_control_id", ""),
+                },
+            )
 
         async_dispatcher_send(hass, SIGNAL_CALL_STATUS_UPDATE)
 
