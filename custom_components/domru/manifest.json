@@ -9,7 +9,10 @@
     "stream"
   ],
   "documentation": "https://github.com/lolmaxlevel/domru-ha",
+  "requirements": [
+    "firebase-messaging>=0.4"
+  ],
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/lolmaxlevel/domru-ha/issues",
-  "version": "1.1.4"
+  "version": "1.2.0"
 }
