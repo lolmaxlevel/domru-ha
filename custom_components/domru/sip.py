@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection, Mapping
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +52,21 @@ SECRET_HEADERS = {
     "www-authenticate",
     "proxy-authenticate",
 }
+
+
+def _normalized_access_control_targets(
+    targets: Collection[tuple[str | int, str | int]] | None,
+    place_id: str | int | None = None,
+    access_control_id: str | int | None = None,
+) -> set[tuple[str, str]]:
+    """Return normalized FCM routing targets with an optional default target."""
+    normalized = {
+        (str(target_place_id), str(target_access_control_id))
+        for target_place_id, target_access_control_id in (targets or ())
+    }
+    if place_id is not None and access_control_id is not None:
+        normalized.add((str(place_id), str(access_control_id)))
+    return normalized
 
 
 def _header_key(name: str) -> str:
@@ -311,6 +326,15 @@ class SipCall:
     bye_cseq: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class SipAccount:
+    """SIP credentials associated with one access-control target."""
+
+    realm: str
+    username: str
+    password: str
+
+
 class DomruSipClient:
     """Small UDP SIP user agent for Dom.ru intercom calls."""
 
@@ -329,6 +353,9 @@ class DomruSipClient:
         server_ip: str | None = None,
         place_id: str | int | None = None,
         access_control_id: str | int | None = None,
+        access_control_targets: Collection[tuple[str | int, str | int]] | None = None,
+        access_control_accounts: Mapping[tuple[str | int, str | int], SipAccount]
+        | None = None,
     ) -> None:
         """Initialize the SIP client."""
         self.realm = realm
@@ -347,6 +374,12 @@ class DomruSipClient:
         self._access_control_id = (
             str(access_control_id) if access_control_id is not None else None
         )
+        self._configure_access_control_routing(
+            access_control_targets,
+            access_control_accounts,
+            place_id,
+            access_control_id,
+        )
 
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: SipProtocol | None = None
@@ -361,7 +394,7 @@ class DomruSipClient:
         self._unregister_cseq: str | None = None
         self._push_call_id: str | None = None
         self._push_token: str | None = None
-        self._push_binding_pending = False
+        self._push_target: tuple[str, str] | None = None
         self._register_timer: asyncio.TimerHandle | None = None
         self._register_response_timer: asyncio.TimerHandle | None = None
         self._register_retry_timer: asyncio.TimerHandle | None = None
@@ -382,6 +415,26 @@ class DomruSipClient:
         self._last_event = "initialized"
         self._last_register_at: str | None = None
         self._last_registered_at: str | None = None
+
+    def _configure_access_control_routing(
+        self,
+        targets: Collection[tuple[str | int, str | int]] | None,
+        accounts: Mapping[tuple[str | int, str | int], SipAccount] | None,
+        place_id: str | int | None,
+        access_control_id: str | int | None,
+    ) -> None:
+        """Initialize normalized per-door routing and SIP account state."""
+        self._access_control_targets = _normalized_access_control_targets(
+            targets,
+            place_id,
+            access_control_id,
+        )
+        self._access_control_accounts = {
+            (str(target[0]), str(target[1])): account
+            for target, account in (accounts or {}).items()
+        }
+        self._access_control_targets.update(self._access_control_accounts)
+        self._account_server_addrs: dict[tuple[str, str], tuple[str, int]] = {}
 
     @staticmethod
     def _tag() -> str:
@@ -465,6 +518,11 @@ class DomruSipClient:
         """Return when registration last succeeded."""
         return self._last_registered_at
 
+    @property
+    def current_fcm_target(self) -> tuple[str, str] | None:
+        """Return the access control that owns the current FCM call session."""
+        return self._push_target
+
     def get_active_call_info(self) -> dict[str, Any] | None:
         """Return the active call as a dict for Home Assistant attributes."""
         if not self._active_call:
@@ -485,6 +543,7 @@ class DomruSipClient:
 
         loop = asyncio.get_running_loop()
         await self._resolve_server_addr()
+        await self._resolve_access_control_accounts()
         self._protocol = SipProtocol(self)
         self._transport, _ = await loop.create_datagram_endpoint(
             lambda: self._protocol,
@@ -553,21 +612,141 @@ class DomruSipClient:
         access_control_id: str | int | None,
     ) -> bool:
         """Return whether an FCM event belongs to this SIP client."""
-        return (
-            self._place_id is not None
-            and self._access_control_id is not None
-            and str(place_id) == self._place_id
-            and str(access_control_id) == self._access_control_id
-        )
+        return (str(place_id), str(access_control_id)) in self._access_control_targets
 
-    def is_current_fcm_call(self, call_id: str | None) -> bool:
+    def set_access_control_targets(
+        self,
+        targets: Collection[tuple[str | int, str | int]],
+    ) -> None:
+        """Replace the FCM access controls routed through this SIP client."""
+        normalized = _normalized_access_control_targets(
+            targets,
+            self._place_id,
+            self._access_control_id,
+        )
+        if self._access_control_accounts:
+            normalized.intersection_update(self._access_control_accounts)
+        self._access_control_targets = normalized
+
+    def is_current_fcm_call(
+        self,
+        call_id: str | None,
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
+    ) -> bool:
         """Return whether an FCM end event belongs to the current call session."""
         if not call_id:
             return False
-        current_call_id = (
-            self._active_call.call_id if self._active_call else self._push_call_id
+        if place_id is not None and access_control_id is not None:
+            event_target = (str(place_id), str(access_control_id))
+            if self._push_target is not None and event_target != self._push_target:
+                return False
+        return self._push_call_id is not None and call_id == self._push_call_id
+
+    def _can_accept_fcm_call(
+        self,
+        call_id: str | None,
+        target: tuple[str, str] | None,
+    ) -> bool:
+        """Return whether an FCM ring can own the single active SIP session."""
+        if target is not None and target not in self._access_control_targets:
+            _LOGGER.warning(
+                "Ignoring FCM call for unsupported access control "
+                "place_id=%s access_control_id=%s",
+                target[0],
+                target[1],
+            )
+            return False
+
+        current_call_id = self._push_call_id or (
+            self._active_call.call_id if self._active_call else None
         )
-        return current_call_id is not None and call_id == current_call_id
+        owns_active_session = bool(
+            self._active_call
+            or (
+                self._registration_mode == "on_demand"
+                and self._on_demand_session_active
+            )
+        )
+        if (
+            target is not None
+            and self._push_target is not None
+            and target != self._push_target
+            and owns_active_session
+        ):
+            _LOGGER.warning(
+                "Ignoring FCM call for access control %s while access control %s "
+                "owns the active SIP session",
+                target[1],
+                self._push_target[1],
+            )
+            return False
+        if (
+            call_id
+            and current_call_id
+            and call_id != current_call_id
+            and owns_active_session
+        ):
+            _LOGGER.warning(
+                "Ignoring overlapping FCM call %s while call %s is active",
+                call_id,
+                current_call_id,
+            )
+            return False
+        return True
+
+    def _activate_access_control_account(
+        self,
+        target: tuple[str, str] | None,
+    ) -> bool:
+        """Select preloaded SIP credentials for an FCM access control."""
+        if target is None or not self._access_control_accounts:
+            return True
+        account = self._access_control_accounts.get(target)
+        if account is None:
+            _LOGGER.warning(
+                "Ignoring FCM call because SIP credentials were not loaded for "
+                "place_id=%s access_control_id=%s",
+                target[0],
+                target[1],
+            )
+            return False
+
+        account_is_active = (
+            self.realm == account.realm
+            and self.username == account.username
+            and self.password == account.password
+        )
+        if account_is_active:
+            self._server_addr = self._account_server_addrs.get(
+                target,
+                self._server_addr,
+            )
+            return True
+        if self._registration_mode != "on_demand":
+            _LOGGER.warning(
+                "Persistent SIP cannot switch accounts for access control %s; "
+                "use on-demand FCM mode for multiple SIP accounts",
+                target[1],
+            )
+            return False
+
+        self.realm = account.realm
+        self.username = account.username
+        self.password = account.password
+        self._server_addr = self._account_server_addrs.get(
+            target,
+            (self._server_ip or account.realm, SIP_SERVER_PORT),
+        )
+        self._registered_contact_uri = ""
+        _LOGGER.info(
+            "Selected SIP account for FCM access control place_id=%s "
+            "access_control_id=%s realm=%s",
+            target[0],
+            target[1],
+            account.realm,
+        )
+        return True
 
     def register_for_incoming_call(
         self,
@@ -575,60 +754,67 @@ class DomruSipClient:
         unregister_delay: float = DEFAULT_FCM_REGISTER_HOLD,
         call_id: str | None = None,
         fcm_token: str | None = None,
-    ) -> None:
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
+    ) -> bool:
         """Register for an FCM-notified call and unregister if no INVITE arrives."""
+        target = (
+            (str(place_id), str(access_control_id))
+            if place_id is not None and access_control_id is not None
+            else None
+        )
+        if not self._can_accept_fcm_call(
+            call_id,
+            target,
+        ) or not self._activate_access_control_account(target):
+            return False
+
+        is_existing_on_demand_session = bool(
+            self._registration_mode == "on_demand"
+            and self._on_demand_session_active
+            and call_id is None
+        )
         previous_call_id = self._push_call_id
         is_duplicate_fcm_call = bool(
             call_id
             and call_id == previous_call_id
             and self._register_response_timer is not None
         )
-        if call_id and fcm_token:
+        if call_id:
             self._push_call_id = call_id
+        if fcm_token:
             self._push_token = fcm_token
-        elif call_id:
+        elif call_id and not self._push_token:
             _LOGGER.warning("FCM call %s arrived without an FCM token", call_id)
-        self._on_demand_session_active = True
-        if is_duplicate_fcm_call:
+        if target is not None:
+            self._push_target = target
+        if self._registration_mode == "on_demand":
+            self._on_demand_session_active = True
+        if is_duplicate_fcm_call or is_existing_on_demand_session:
             _LOGGER.debug(
-                "Ignoring duplicate FCM call %s while SIP registration is pending",
-                call_id,
+                "Keeping the existing on-demand SIP registration for call %s",
+                call_id or previous_call_id,
             )
-            if self._registration_mode == "on_demand" and unregister_delay > 0:
-                self._schedule_delayed_unregister(unregister_delay)
-            return
-
-        self.register_now(force=bool(call_id and call_id != previous_call_id))
-        if self._registration_mode != "on_demand":
-            return
-        if unregister_delay <= 0:
-            return
-        self._schedule_delayed_unregister(unregister_delay)
-
-    def install_fcm_push_binding(self, fcm_token: str) -> None:
-        """
-        Install one FCM-aware SIP binding without scheduling a refresh.
-
-        Linphone prepares the account's push Contact before receiving a push.
-        We mirror that with a single REGISTER so the registrar has the FCM
-        route, but leave refreshing to an actual FCM-notified call.
-        """
-        if self._registration_mode != "on_demand":
-            return
-        if not fcm_token:
-            return
-        if not self._running:
-            _LOGGER.warning("Cannot install SIP FCM push binding before SIP starts")
-            return
-
-        self._push_token = fcm_token
-        self._push_call_id = None
-        self.register_now(force=True)
-        self._push_binding_pending = True
+        else:
+            self.register_now(
+                force=bool(
+                    self._registration_mode == "on_demand"
+                    and call_id
+                    and call_id != previous_call_id
+                )
+            )
+        if self._registration_mode == "on_demand" and unregister_delay > 0:
+            self._schedule_delayed_unregister(unregister_delay)
+        return True
 
     def end_on_demand_session(self) -> None:
         """Stop SIP activity associated with the current FCM call notification."""
+        self.end_fcm_call_session()
+
+    def end_fcm_call_session(self) -> None:
+        """Clear the current FCM call and stop on-demand SIP activity."""
         if self._registration_mode != "on_demand":
+            self._clear_push_contact()
             return
 
         self._on_demand_session_active = False
@@ -745,7 +931,6 @@ class DomruSipClient:
         self._expires = DEFAULT_REGISTER_EXPIRES
         self._registered = False
         self._unregister_cseq = None
-        self._push_binding_pending = False
         self._auth_failure = 0
         self._last_nonce = ""
         self._cancel_register_response_timer()
@@ -756,37 +941,45 @@ class DomruSipClient:
 
     async def _resolve_server_addr(self) -> None:
         """Resolve registrar host once so UDP sendto receives a numeric IP."""
+        self._server_addr = await self._resolve_realm_addr(self.realm)
+        _LOGGER.info(
+            "Resolved SIP registrar %s to %s:%d",
+            self.realm,
+            self._server_addr[0],
+            self._server_addr[1],
+        )
+
+    async def _resolve_access_control_accounts(self) -> None:
+        """Resolve every preloaded SIP account before FCM callbacks begin."""
+        resolved_realms = {self.realm: self._server_addr}
+        for target, account in self._access_control_accounts.items():
+            server_addr = resolved_realms.get(account.realm)
+            if server_addr is None:
+                server_addr = await self._resolve_realm_addr(account.realm)
+                resolved_realms[account.realm] = server_addr
+            self._account_server_addrs[target] = server_addr
+
+    async def _resolve_realm_addr(self, realm: str) -> tuple[str, int]:
+        """Return a numeric registrar address when DNS resolution succeeds."""
         if self._server_ip:
-            self._server_addr = (self._server_ip, SIP_SERVER_PORT)
-            _LOGGER.info(
-                "Using configured SIP registrar IP %s:%d for realm %s",
-                self._server_addr[0],
-                self._server_addr[1],
-                self.realm,
-            )
-            return
+            return self._server_ip, SIP_SERVER_PORT
 
         try:
             infos = await asyncio.get_running_loop().getaddrinfo(
-                self.realm,
+                realm,
                 SIP_SERVER_PORT,
                 family=sync_socket.AF_INET,
                 type=sync_socket.SOCK_DGRAM,
             )
         except OSError:
-            self._record_error(f"failed to resolve SIP registrar {self.realm}")
-            _LOGGER.exception("Failed to resolve SIP registrar %s", self.realm)
-            return
+            self._record_error(f"failed to resolve SIP registrar {realm}")
+            _LOGGER.exception("Failed to resolve SIP registrar %s", realm)
+            return realm, SIP_SERVER_PORT
 
         if infos:
             sockaddr = infos[0][4]
-            self._server_addr = (sockaddr[0], sockaddr[1])
-            _LOGGER.info(
-                "Resolved SIP registrar %s to %s:%d",
-                self.realm,
-                self._server_addr[0],
-                self._server_addr[1],
-            )
+            return sockaddr[0], sockaddr[1]
+        return realm, SIP_SERVER_PORT
 
     def _build_register(
         self,
@@ -819,6 +1012,7 @@ class DomruSipClient:
             ),
             ("User-Agent", USER_AGENT),
             ("Supported", "replaces, outbound, gruu, path"),
+            ("Accept", "application/sdp"),
             ("Expires", str(expires_value)),
         ]
         if authorization:
@@ -841,6 +1035,7 @@ class DomruSipClient:
     def _clear_push_contact(self) -> None:
         """Forget call-specific push routing data after a SIP session ends."""
         self._push_call_id = None
+        self._push_target = None
 
     def _send_register(self, authorization: str | None = None) -> None:
         """Send REGISTER to the SIP server."""
@@ -874,6 +1069,14 @@ class DomruSipClient:
         status = message.status_code
         method = message.cseq_method
         if method == "REGISTER":
+            response_call_id = message.first_header("Call-ID")
+            if response_call_id != self._registration_call_id:
+                _LOGGER.debug(
+                    "Ignoring stale SIP REGISTER response call_id=%s current=%s",
+                    response_call_id or "-",
+                    self._registration_call_id or "-",
+                )
+                return
             self._cancel_register_response_timer()
         if status == SIP_STATUS_UNAUTHORIZED and method == "REGISTER":
             self._handle_register_challenge(message)
@@ -891,6 +1094,8 @@ class DomruSipClient:
             status == SIP_STATUS_OK
             and method == "BYE"
             and self._call_status == "ending"
+            and self._active_call is not None
+            and message.first_header("Call-ID") == self._active_call.call_id
         ):
             self._end_call()
 
@@ -899,7 +1104,6 @@ class DomruSipClient:
         if (
             self._registration_mode == "on_demand"
             and not self._on_demand_session_active
-            and not self._push_binding_pending
         ):
             _LOGGER.debug("Ignoring SIP REGISTER challenge after on-demand call ended")
             return
@@ -973,15 +1177,6 @@ class DomruSipClient:
         self._last_error = None
         self._last_registered_at = self._now()
         self._last_event = "registered"
-        if self._push_binding_pending:
-            self._push_binding_pending = False
-            self._registered = False
-            self._cancel_register_timers()
-            _LOGGER.info(
-                "SIP FCM push binding installed expires=%ds without refresh",
-                self._expires,
-            )
-            return
         if (
             self._registration_mode == "on_demand"
             and not self._on_demand_session_active
@@ -1104,8 +1299,31 @@ class DomruSipClient:
 
     def _handle_invite(self, message: SipMessage, addr: tuple[str, int]) -> None:
         """Handle inbound intercom INVITE."""
-        self._cancel_delayed_unregister()
         call_id = message.first_header("Call-ID")
+        other_leg_call_id = message.first_header("Other-Leg-Call-ID")
+        # Dom.ru creates a new SIP dialog ID and links it to the FCM call here.
+        matches_fcm_call = self._push_call_id is None or self._push_call_id in {
+            call_id,
+            other_leg_call_id,
+        }
+        if self._registration_mode == "on_demand" and (
+            not self._on_demand_session_active or not matches_fcm_call
+        ):
+            _LOGGER.warning(
+                "Rejecting SIP INVITE outside the active FCM call "
+                "call_id=%s other_leg_call_id=%s expected_fcm_call_id=%s",
+                call_id or "-",
+                other_leg_call_id or "-",
+                self._push_call_id or "-",
+            )
+            self._send_response(
+                "486 Busy Here",
+                message,
+                to_tag=self._tag(),
+                addr=addr,
+            )
+            return
+        self._cancel_delayed_unregister()
         if self._active_call and self._active_call.call_id == call_id:
             if self._call_status == "ringing":
                 self._send_trying(self._active_call)
@@ -1176,18 +1394,38 @@ class DomruSipClient:
 
     def _handle_cancel(self, message: SipMessage, addr: tuple[str, int]) -> None:
         """Handle CANCEL for a ringing INVITE."""
-        self._send_response("200 OK", message, addr=addr)
-        if self._active_call:
+        if (
+            self._active_call is None
+            or self._call_status != "ringing"
+            or message.first_header("Call-ID") != self._active_call.call_id
+        ):
             self._send_response(
-                "487 Request Terminated",
-                self._active_call.invite,
-                to_tag=self._active_call.local_tag,
-                addr=self._active_call.addr,
+                "481 Call/Transaction Does Not Exist",
+                message,
+                addr=addr,
             )
+            return
+        self._send_response("200 OK", message, addr=addr)
+        self._send_response(
+            "487 Request Terminated",
+            self._active_call.invite,
+            to_tag=self._active_call.local_tag,
+            addr=self._active_call.addr,
+        )
         self._end_call()
 
     def _handle_remote_bye(self, message: SipMessage, addr: tuple[str, int]) -> None:
         """Handle BYE sent by the remote side."""
+        if (
+            self._active_call is None
+            or message.first_header("Call-ID") != self._active_call.call_id
+        ):
+            self._send_response(
+                "481 Call/Transaction Does Not Exist",
+                message,
+                addr=addr,
+            )
+            return
         self._send_response("200 OK", message, addr=addr)
         self._end_call()
 
@@ -1322,12 +1560,10 @@ class DomruSipClient:
         self._pending_hangup_after_ack = False
         _LOGGER.info("SIP call cleared call_id=%s", call_id)
         self._emit_event("call_ended")
-        if (
-            self._registration_mode == "on_demand"
-            and self._on_demand_session_active
-            and self._registered
-        ):
-            self._schedule_delayed_unregister()
+        if self._registration_mode == "on_demand" and self._on_demand_session_active:
+            self.end_fcm_call_session()
+        else:
+            self._clear_push_contact()
 
     def _schedule_delayed_unregister(self, delay: float | None = None) -> None:
         """Schedule delayed unregister for on-demand SIP mode."""

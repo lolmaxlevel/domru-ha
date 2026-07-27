@@ -75,7 +75,10 @@ class CapturingClient(DomruApiClient):
             }
         )
         if self.responses:
-            return self.responses.pop(0)
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
         return {"data": {"ok": True}}
 
 
@@ -125,6 +128,13 @@ class ApiEndpointTests(unittest.TestCase):
 
         self.assertEqual(places, [{"id": 1}])
         self.assertIn("rest/v3/subscriber-places", client.requests[0]["url"])
+
+    def test_discovered_ids_are_exposed_without_private_attribute_access(self) -> None:
+        client = CapturingClient()
+        client.set_ids(place_id="place-1", access_control_id="door-1")
+
+        self.assertEqual(client.place_id, "place-1")
+        self.assertEqual(client.access_control_id, "door-1")
 
     def test_async_get_data_fetches_access_controls_per_place(self) -> None:
         client = CapturingClient(
@@ -268,6 +278,28 @@ class ApiEndpointTests(unittest.TestCase):
         )
         self.assertEqual(client.requests[2]["json"], {"installationId": "install-1"})
 
+    def test_get_sip_credentials_can_target_a_specific_access_control(self) -> None:
+        client = CapturingClient(
+            responses=[
+                {"data": {"login": "sip-2", "password": "secret", "realm": "realm"}}
+            ]
+        )
+
+        credentials = asyncio.run(
+            client.async_get_sip_credentials(
+                "install-1",
+                place_id="place-1",
+                access_control_id="door-2",
+            )
+        )
+
+        self.assertEqual(credentials["login"], "sip-2")
+        self.assertEqual(len(client.requests), 1)
+        self.assertIn(
+            "rest/v1/places/place-1/accesscontrols/door-2/sipdevices",
+            client.requests[0]["url"],
+        )
+
     def test_register_push_device_mirrors_android_device_installation(self) -> None:
         client = CapturingClient()
 
@@ -283,11 +315,30 @@ class ApiEndpointTests(unittest.TestCase):
             client.requests[0]["url"],
         )
         self.assertIn("rest/v1/subscriberNotifications", client.requests[1]["url"])
-        body = client.requests[0]["json"]
-        self.assertEqual(body["installationId"], "install-1")
-        self.assertEqual(body["pushToken"], "fcm-token")
-        self.assertEqual(body["platform"], "google")
-        self.assertEqual(body["deviceType"], "MOBILE_APPLICATION")
+        public_request, subscriber_request = client.requests
+        public_body = public_request["json"]
+        subscriber_body = subscriber_request["json"]
+        self.assertFalse(public_request["authenticated"])
+        self.assertNotIn("deviceType", public_body)
+        self.assertTrue(subscriber_request["authenticated"])
+        self.assertEqual(public_body["installationId"], "install-1")
+        self.assertEqual(public_body["pushToken"], "fcm-token")
+        self.assertEqual(public_body["platform"], "google")
+        self.assertEqual(public_body["appVersion"], "9.9.0")
+        self.assertEqual(public_body["appVersionCode"], 90900020)
+        self.assertEqual(subscriber_body["deviceType"], "MOBILE_APPLICATION")
+
+    def test_push_registration_attempts_subscriber_binding_after_public_failure(
+        self,
+    ) -> None:
+        client = CapturingClient(responses=[RuntimeError("public failed")])
+
+        with self.assertLogs("domru_api_for_tests", level="WARNING"):
+            result = asyncio.run(client.register_push_device("fcm-token", "install-1"))
+
+        self.assertFalse(result)
+        self.assertEqual(len(client.requests), 2)
+        self.assertIn("subscriberNotifications", client.requests[1]["url"])
 
     def test_unregister_push_device_omits_push_token(self) -> None:
         client = CapturingClient()

@@ -136,6 +136,7 @@ class FakeSuccessClient:
 
     def __init__(self) -> None:
         self.started = False
+        self.stopped = False
 
     async def checkin_or_register(self) -> str:
         return "fcm-token"
@@ -144,7 +145,7 @@ class FakeSuccessClient:
         self.started = True
 
     async def stop(self) -> None:
-        return None
+        self.stopped = True
 
     def is_started(self) -> bool:
         return self.started
@@ -168,6 +169,26 @@ class FakeSuccessFirebaseMessaging:
     @classmethod
     def FcmPushClient(cls, *_args, **_kwargs):
         cls.client = FakeSuccessClient()
+        return cls.client
+
+
+class FakeStartFailureClient(FakeSuccessClient):
+    """FCM client fake that fails after its receiver starts."""
+
+    async def start(self) -> None:
+        self.started = True
+        msg = "start failed"
+        raise RuntimeError(msg)
+
+
+class FakeStartFailureFirebaseMessaging(FakeSuccessFirebaseMessaging):
+    """Firebase module fake for partial-start cleanup tests."""
+
+    client: FakeStartFailureClient | None = None
+
+    @classmethod
+    def FcmPushClient(cls, *_args, **_kwargs):
+        cls.client = FakeStartFailureClient()
         return cls.client
 
 
@@ -318,24 +339,6 @@ class FcmPayloadTests(unittest.TestCase):
         self.assertIn("FCM push token registration succeeded", output)
         self.assertIn("FCM intercom listener started", output)
 
-    def test_fcm_start_notifies_when_push_token_is_ready(self) -> None:
-        sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
-        received_tokens = []
-        listener = DomruFcmListener(
-            FakeHass(),
-            FakeEntry(),
-            FakeApi(),
-            "install-1",
-            on_token_ready=received_tokens.append,
-        )
-
-        try:
-            asyncio.run(listener.async_start())
-        finally:
-            sys.modules.pop("firebase_messaging", None)
-
-        self.assertEqual(received_tokens, ["fcm-token"])
-
     def test_fcm_start_logs_push_registration_failure(self) -> None:
         sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
         listener = DomruFcmListener(
@@ -382,6 +385,55 @@ class FcmPayloadTests(unittest.TestCase):
         self.assertEqual(api.registered_tokens, [])
         self.assertFalse(client.started)
         self.assertTrue(client.stopped)
+
+    def test_fcm_stop_before_start_prevents_late_startup(self) -> None:
+        async def run() -> tuple[DomruFcmListener, FakeApi]:
+            sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+            FakeSuccessFirebaseMessaging.client = None
+            api = FakeApi()
+            listener = DomruFcmListener(
+                FakeHass(),
+                FakeEntry(),
+                api,
+                "install-1",
+            )
+
+            try:
+                start_task = asyncio.create_task(listener.async_start())
+                await listener.async_stop()
+                await start_task
+                return listener, api
+            finally:
+                sys.modules.pop("firebase_messaging", None)
+
+        listener, api = asyncio.run(run())
+
+        self.assertTrue(listener._closed)
+        self.assertTrue(listener._stopped)
+        self.assertIsNone(FakeSuccessFirebaseMessaging.client)
+        self.assertIsNone(listener._client)
+        self.assertEqual(api.registered_tokens, [])
+
+    def test_fcm_start_failure_stops_partially_started_client(self) -> None:
+        sys.modules["firebase_messaging"] = FakeStartFailureFirebaseMessaging
+        FakeStartFailureFirebaseMessaging.client = None
+        listener = DomruFcmListener(
+            FakeHass(),
+            FakeEntry(),
+            FakeApi(),
+            "install-1",
+        )
+
+        try:
+            with self.assertLogs(fcm_module.LOGGER, level="WARNING"):
+                asyncio.run(listener.async_start())
+        finally:
+            sys.modules.pop("firebase_messaging", None)
+
+        client = FakeStartFailureFirebaseMessaging.client
+        self.assertTrue(client.started)
+        self.assertTrue(client.stopped)
+        self.assertIsNone(listener._client)
 
 
 if __name__ == "__main__":

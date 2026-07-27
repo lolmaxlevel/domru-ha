@@ -9,7 +9,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 
 if TYPE_CHECKING:
@@ -28,7 +27,6 @@ try:
         FCM_PROJECT_ID,
         FCM_SENDER_ID,
         LOGGER,
-        SIGNAL_DOORBELL,
     )
 except ImportError:  # pragma: no cover - used by standalone unit-test loading
     import logging
@@ -41,7 +39,6 @@ except ImportError:  # pragma: no cover - used by standalone unit-test loading
     FCM_API_KEY = "AIzaSyB_26K8ZB7iu7qZBpBf5c4NLgvTC3Yrgpk"
     FCM_BUNDLE_ID = "ru.inetra.intercom"
     LOGGER = logging.getLogger(__name__)
-    SIGNAL_DOORBELL = "domru_doorbell"
 
 FCM_WATCHDOG_INTERVAL = timedelta(minutes=2)
 
@@ -94,7 +91,6 @@ class DomruFcmListener:
         api: DomruApiClient,
         installation_id: str,
         on_event: Callable[[dict[str, Any]], None] | None = None,
-        on_token_ready: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the listener."""
         self._hass = hass
@@ -102,16 +98,18 @@ class DomruFcmListener:
         self._api = api
         self._installation_id = installation_id
         self._on_event = on_event
-        self._on_token_ready = on_token_ready
         self._client: Any = None
         self._watchdog_unsub: Callable[[], None] | None = None
         self._connect_lock = asyncio.Lock()
         self._reconnecting = False
         self._stopped = True
+        self._closed = False
         self.fcm_token: str | None = None
 
     async def async_start(self) -> None:
         """Connect to FCM and start watchdog checks."""
+        if self._closed or not self._stopped:
+            return
         self._stopped = False
         await self._async_connect()
         if not self._stopped and self._watchdog_unsub is None:
@@ -131,6 +129,7 @@ class DomruFcmListener:
         if self._stopped:
             return
 
+        client: Any = None
         try:
             firebase_messaging = await self._hass.async_add_executor_job(
                 importlib.import_module,
@@ -184,8 +183,7 @@ class DomruFcmListener:
             self._client = client
             fcm_token = await client.checkin_or_register()
             if self._stopped:
-                with suppress(Exception):
-                    await client.stop()
+                await self._async_stop_client(client)
                 return
 
             self._client = client
@@ -203,22 +201,28 @@ class DomruFcmListener:
             else:
                 LOGGER.warning("FCM push token registration failed")
             if self._stopped:
-                with suppress(Exception):
-                    await client.stop()
+                await self._async_stop_client(client)
                 return
 
             await client.start()
             if self._stopped:
-                with suppress(Exception):
-                    await client.stop()
+                await self._async_stop_client(client)
                 return
 
             LOGGER.info("FCM intercom listener started")
-            if token_registered and self._on_token_ready:
-                self._on_token_ready(fcm_token)
         except Exception as err:  # noqa: BLE001
             LOGGER.warning("Failed to start FCM listener: %s", err, exc_info=True)
-            self._client = None
+            await self._async_stop_client(client)
+            if self._client is client:
+                self._client = None
+
+    @staticmethod
+    async def _async_stop_client(client: Any) -> None:
+        """Best-effort cleanup for a fully or partially started FCM client."""
+        if client is None:
+            return
+        with suppress(Exception):
+            await client.stop()
 
     async def _async_watchdog(self, _now: Any = None) -> None:
         """Reconnect if the FCM receiver is no longer active."""
@@ -241,12 +245,11 @@ class DomruFcmListener:
     async def _async_disconnect(self) -> None:
         """Stop the current FCM client without touching the watchdog."""
         client, self._client = self._client, None
-        if client is not None:
-            with suppress(Exception):
-                await client.stop()
+        await self._async_stop_client(client)
 
     async def async_stop(self) -> None:
         """Stop watchdog checks and close the FCM connection."""
+        self._closed = True
         self._stopped = True
         if self._watchdog_unsub is not None:
             self._watchdog_unsub()
@@ -278,6 +281,5 @@ class DomruFcmListener:
             )
             return
 
-        async_dispatcher_send(self._hass, SIGNAL_DOORBELL, event)
         if self._on_event:
             self._on_event(event)
