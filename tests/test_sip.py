@@ -176,6 +176,50 @@ class SipMessageTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertNotIn("hidden", redacted)
 
+    def test_redacted_text_hides_fcm_token_in_sip_contact(self) -> None:
+        msg = SipMessage.parse(
+            "REGISTER sip:example.com SIP/2.0\r\n"
+            "Contact: <sip:user@192.0.2.10>;pn-tok=fcm-secret\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+
+        redacted = msg.to_redacted_text()
+
+        self.assertIn("pn-tok=<redacted>", redacted)
+        self.assertNotIn("fcm-secret", redacted)
+
+    def test_redacted_text_hides_fcm_token_in_sip_request_uri(self) -> None:
+        msg = SipMessage.parse(
+            "OPTIONS sip:user@example.com;pn-tok=fcm-secret SIP/2.0\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+
+        redacted = msg.to_redacted_text()
+
+        self.assertIn("pn-tok=<redacted>", redacted)
+        self.assertNotIn("fcm-secret", redacted)
+
+    def test_wire_log_hides_fcm_token_in_sip_request_uri(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+        )
+        message = SipMessage.parse(
+            "OPTIONS sip:user@example.com;pn-tok=fcm-secret SIP/2.0\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+
+        with self.assertLogs("domru_sip_for_tests", level="DEBUG") as logs:
+            client._log_wire(">>>", message, ("198.51.100.1", 5060))
+
+        output = "\n".join(logs.output)
+        self.assertIn("pn-tok=<redacted>", output)
+        self.assertNotIn("fcm-secret", output)
+        self.assertEqual(output.count("OPTIONS sip:user@example.com"), 1)
+
 
 class DigestAuthTests(unittest.TestCase):
     """Digest authentication behavior."""
@@ -450,6 +494,7 @@ class DomruSipClientTests(SipTestCase):
         client._transport = transport
         client._running = True
         client._registered = True
+        client._on_demand_session_active = True
         client._active_call = type("Call", (), {"call_id": "old-call"})()
 
         client._end_call()
@@ -460,6 +505,175 @@ class DomruSipClientTests(SipTestCase):
         self.assertFalse(self.active_scheduled_handles())
         self.assertTrue(client.is_registered)
         self.assertEqual(transport.sent, [])
+
+    def test_on_demand_fcm_register_unregisters_when_no_invite_arrives(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+
+        client.register_for_incoming_call(unregister_delay=0.1)
+
+        self.assertTrue(transport.sent[-1][0].startswith("REGISTER "))
+        self.assertTrue(self.active_scheduled_handles())
+
+        client._registered = True
+        self.loop.run_until_complete(asyncio.sleep(0.2))
+
+        unregister = transport.sent[-1][0]
+        self.assertIn("REGISTER sip:5676.spb.domofon.domru.ru SIP/2.0", unregister)
+        self.assertIn("Expires: 0\r\n", unregister)
+        self.assertFalse(client.is_registered)
+
+    def test_fcm_register_uses_official_push_contact_parameters(self) -> None:
+        client, transport = self.make_client()
+
+        client.register_for_incoming_call(
+            call_id="doorbell-call-1",
+            fcm_token="fcm-token-1",
+        )
+
+        register = transport.sent[-1][0]
+        self.assertIn(
+            "Contact: <sip:user@192.0.2.10:5060;transport=udp;"
+            "app-id=com.novotelecom.domophone;pn-type=google;"
+            "Call-Id:%20doorbell-call-1;pn-tok=fcm-token-1>;"
+            '+sip.instance="<urn:uuid:',
+            register,
+        )
+
+    def test_fcm_events_are_scoped_to_the_sip_access_control(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            place_id="place-1",
+            access_control_id="door-1",
+        )
+
+        self.assertTrue(client.matches_access_control("place-1", "door-1"))
+        self.assertFalse(client.matches_access_control("place-1", "door-2"))
+        self.assertFalse(client.matches_access_control("place-2", "door-1"))
+
+    def test_fcm_end_must_match_the_active_call_id(self) -> None:
+        client, _ = self.make_client()
+        client._push_call_id = "new-call"
+
+        self.assertTrue(client.is_current_fcm_call("new-call"))
+        self.assertFalse(client.is_current_fcm_call("old-call"))
+        self.assertFalse(client.is_current_fcm_call(None))
+
+    def test_fcm_push_prebind_does_not_schedule_reregistration(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+
+        client.install_fcm_push_binding("fcm-token-1")
+
+        register = transport.sent[-1][0]
+        self.assertIn(
+            "Contact: <sip:user@192.0.2.10:5060;transport=udp;"
+            "app-id=com.novotelecom.domophone;pn-type=google;"
+            "pn-tok=fcm-token-1>;",
+            register,
+        )
+        self.assertNotIn("Call-Id:", register)
+
+        response = (
+            "SIP/2.0 200 OK\r\n"
+            "CSeq: 1 REGISTER\r\n"
+            "Contact: <sip:user@192.0.2.10:5060>;expires=30\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+        client.handle_message(response.encode(), ("158.160.67.92", 5060))
+
+        self.assertFalse(client.is_registered)
+        self.assertFalse(self.active_scheduled_handles())
+
+    def test_duplicate_fcm_call_does_not_restart_pending_registration(self) -> None:
+        client, transport = self.make_client()
+
+        client.register_for_incoming_call(
+            call_id="doorbell-call-1",
+            fcm_token="fcm-token-1",
+        )
+        sent_count = len(transport.sent)
+
+        client.register_for_incoming_call(
+            call_id="doorbell-call-1",
+            fcm_token="fcm-token-1",
+        )
+
+        self.assertEqual(len(transport.sent), sent_count)
+        self.assertEqual(client.cseq, 1)
+
+    def test_fcm_call_end_unregisters_without_waiting_for_refresh(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+
+        client.register_for_incoming_call()
+        client._registered = True
+        client._schedule_register()
+        client.end_on_demand_session()
+
+        unregister = transport.sent[-1][0]
+        self.assertIn("Expires: 0\r\n", unregister)
+        self.assertFalse(client.is_registered)
+        self.assertFalse(self.active_scheduled_handles())
+
+    def test_unregister_response_with_nonzero_expiry_does_not_reregister(self) -> None:
+        client = DomruSipClient(
+            realm="5676.spb.domofon.domru.ru",
+            username="user",
+            password="pass",
+            local_ip="192.0.2.10",
+            local_port=5060,
+            registration_mode="on_demand",
+        )
+        transport = FakeTransport()
+        client._transport = transport
+        client._running = True
+        client.register_for_incoming_call()
+        client._registered = True
+        client.end_on_demand_session()
+        sent_count = len(transport.sent)
+
+        response = (
+            "SIP/2.0 200 OK\r\n"
+            "CSeq: 2 REGISTER\r\n"
+            "Contact: <sip:user@192.0.2.10:5060>;expires=22\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+        client.handle_message(response.encode(), ("158.160.67.92", 5060))
+
+        self.assertFalse(client.is_registered)
+        self.assertEqual(len(transport.sent), sent_count)
+        self.assertFalse(self.active_scheduled_handles())
 
     def test_udp_connection_lost_marks_client_not_running(self) -> None:
         client, _transport = self.make_client()

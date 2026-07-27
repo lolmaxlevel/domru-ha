@@ -11,7 +11,7 @@ from .access_control import access_control_label, valid_access_controls
 from .const import SIGNAL_CALL_STATUS_UPDATE
 from .door import async_open_door
 from .entity import DomruEntity
-from .sip_entities import dismiss_call
+from .sip_entities import async_answer_and_hangup_when_ready, dismiss_call
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -116,7 +116,7 @@ class DomruButtonEntity(DomruEntity, ButtonEntity):
         """Handle the button press."""
         if self.entity_description.key.startswith("open_door"):
             if self._sip_client:
-                self._sip_client.answer_and_hangup()
+                await async_answer_and_hangup_when_ready(self._sip_client)
                 async_dispatcher_send(self._hass, SIGNAL_CALL_STATUS_UPDATE)
 
             await async_open_door(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -48,3 +49,34 @@ def dismiss_call(sip_client: Any | None) -> bool:
     if not sip_client:
         return False
     return bool(sip_client.hangup_call())
+
+
+async def async_answer_and_hangup_when_ready(
+    sip_client: Any | None,
+    *,
+    wait_timeout: float = 3.0,
+    poll_interval: float = 0.1,
+) -> bool:
+    """Answer and hang up, waiting briefly for an FCM-triggered SIP INVITE."""
+    if not sip_client:
+        return False
+
+    if str(sip_client.call_status) != "idle":
+        return bool(sip_client.answer_and_hangup())
+
+    register_for_incoming_call = getattr(sip_client, "register_for_incoming_call", None)
+    if callable(register_for_incoming_call):
+        register_for_incoming_call()
+    else:
+        register_now = getattr(sip_client, "register_now", None)
+        if callable(register_now):
+            register_now()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_timeout
+    while loop.time() < deadline:
+        await asyncio.sleep(poll_interval)
+        if str(sip_client.call_status) != "idle":
+            return bool(sip_client.answer_and_hangup())
+
+    return bool(sip_client.answer_and_hangup())

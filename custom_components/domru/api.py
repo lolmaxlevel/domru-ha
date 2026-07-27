@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json as jsonlib
 import logging
+import uuid
 from datetime import UTC, datetime
 from json.decoder import JSONDecodeError
 from typing import Any
@@ -19,7 +20,32 @@ try:
 except ModuleNotFoundError:
     from asyncio import timeout as async_timeout
 
+try:
+    from .const import (
+        ANDROID_APP_VERSION_CODE,
+        ANDROID_APP_VERSION_NAME,
+        ANDROID_DEVICE_MANUFACTURER,
+        ANDROID_DEVICE_MODEL,
+        ANDROID_OS_VERSION,
+    )
+except ImportError:  # pragma: no cover - standalone unit-test loading
+    ANDROID_APP_VERSION_CODE = "90900020"
+    ANDROID_APP_VERSION_NAME = "9.9.0"
+    ANDROID_DEVICE_MANUFACTURER = "Google"
+    ANDROID_DEVICE_MODEL = "sdk_gphone64_x86_64"
+    ANDROID_OS_VERSION = "14"
+
 _LOGGER = logging.getLogger(__name__)
+
+_DEVICE_INSTALLATIONS = (
+    "api/mh-customer-device/mobile/public/v1/customers/device-installations"
+)
+_SUBSCRIBER_NOTIFICATIONS = "rest/v1/subscriberNotifications"
+
+
+def _device_id(installation_id: str) -> str:
+    """Return a stable Android-like device ID for FCM registration."""
+    return uuid.uuid5(uuid.NAMESPACE_DNS, f"domru-fcm-{installation_id}").hex[:16]
 
 
 def _auth_response_data(result: Any) -> dict[str, Any]:
@@ -107,7 +133,7 @@ class DomruApiClient:
     BASE_URL = "https://myhome.proptech.ru/"
     # Full User-Agent from go-impl/pkg/domru/helpers/upstream_request.go
     USER_AGENT = (
-        "Google sdkgphone64x8664 | Android 14 | erth | 8.9.2 (8090200) |  | "
+        "Google sdkgphone64x8664 | Android 14 | erth | 9.9.0 (90900020) |  | "
         "null | 10c99d90-9899-4a25-926f-067b34bc4a7f | null"
     )
     # HTTP status codes
@@ -117,6 +143,7 @@ class DomruApiClient:
     HTTP_INTERNAL_ERROR = 500
     HTTP_OK = 200
     HTTP_CREATED = 201
+    HTTP_NO_CONTENT = 204
     # Error codes
     ERROR_TEMPORARY_CODE_FAILED = 6005
 
@@ -136,8 +163,8 @@ class DomruApiClient:
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._operator_id = operator_id
-        self._place_id: str | None = None
-        self._access_control_id: str | None = None
+        self._place_id: str | int | None = None
+        self._access_control_id: str | int | None = None
         # Hash parameters from go-impl/pkg/auth/password.go
         self._hash2_prefix = "DigitalHomeNTK"
         self._secret = "789sdgHJs678wertv34712376"  # noqa: S105
@@ -156,6 +183,16 @@ class DomruApiClient:
     def operator_id(self) -> str | int | None:
         """Return the current operator ID."""
         return self._operator_id
+
+    @property
+    def place_id(self) -> str | int | None:
+        """Return the default discovered place ID."""
+        return self._place_id
+
+    @property
+    def access_control_id(self) -> str | int | None:
+        """Return the default discovered access-control ID."""
+        return self._access_control_id
 
     def _get_hash1(self) -> str:
         """Generate hash1 (SHA1 of password in base64)."""
@@ -707,61 +744,135 @@ class DomruApiClient:
 
         return str(response) if response else ""
 
-    async def async_get_sip_credentials(self, installation_id: str) -> dict[str, str]:
+    async def async_get_sip_credentials(
+        self,
+        installation_id: str,
+        *,
+        place_id: str | int | None = None,
+        access_control_id: str | int | None = None,
+    ) -> dict[str, str]:
         """Get SIP credentials for receiving calls."""
-        # Need to get the sipdevices URL from place data
-        # First, try to get it from the subscriber place
         try:
-            places_data = await self.get_subscriber_places()
-            if not places_data:
+            if place_id is None or access_control_id is None:
+                place_id, access_control_id = await self._async_default_sip_target()
+            if place_id is None or access_control_id is None:
                 return _empty_sip_credentials()
 
-            # Extract place from response
-            first_place_data = (
-                places_data[0] if isinstance(places_data, list) else places_data
-            )
-            place = (
-                first_place_data.get("place", first_place_data)
-                if isinstance(first_place_data, dict)
-                else {}
-            )
-
-            place_id = place.get("id")
-
-            if not place_id:
-                return _empty_sip_credentials()
-
-            access_controls = place.get("accessControls", [])
-            if not access_controls:
-                access_controls = await self.get_access_controls(place_id)
-
-            # Get first access control device
-            device = access_controls[0] if access_controls else {}
-            device_id = device.get("id")
-
-            if not device_id:
-                return _empty_sip_credentials()
-
-            # Build sipdevices URL
             url = urljoin(
                 self.BASE_URL,
-                f"rest/v1/places/{place_id}/accesscontrols/{device_id}/sipdevices",
+                f"rest/v1/places/{place_id}/accesscontrols/"
+                f"{access_control_id}/sipdevices",
             )
-
-            json_data = {"installationId": installation_id}
-
             result = await self._api_wrapper(
                 url=url,
                 method="POST",
-                json=json_data,
+                json={"installationId": installation_id},
             )
-
             return _sip_credentials_from_response(result)
-
         except Exception:  # pylint: disable=broad-except
             # Log error but don't fail setup
             _LOGGER.exception("Failed to get SIP credentials")
             return _empty_sip_credentials()
+
+    async def _async_default_sip_target(
+        self,
+    ) -> tuple[str | int | None, str | int | None]:
+        """Return the first discovered place/access-control pair for SIP."""
+        places_data = await self.get_subscriber_places()
+        if not places_data:
+            return None, None
+
+        first_place_data = places_data[0]
+        place = first_place_data.get("place", first_place_data)
+        place_id = place.get("id")
+        if place_id is None:
+            return None, None
+
+        access_controls = place.get("accessControls", [])
+        if not access_controls:
+            access_controls = await self.get_access_controls(place_id)
+        device = access_controls[0] if access_controls else {}
+        return place_id, device.get("id")
+
+    def _push_registration_body(
+        self,
+        installation_id: str,
+        fcm_token: str | None = None,
+        *,
+        include_device_type: bool = False,
+    ) -> dict[str, Any]:
+        """Build the Android device payload used for push registration."""
+        body: dict[str, Any] = {
+            "appVersionCode": int(ANDROID_APP_VERSION_CODE),
+            "installationId": installation_id,
+            "appId": 2,
+            "appVersion": ANDROID_APP_VERSION_NAME,
+            "platform": "google",
+            "isDevelop": False,
+            "deviceManufacturer": ANDROID_DEVICE_MANUFACTURER,
+            "deviceModelName": ANDROID_DEVICE_MODEL,
+            "osVersion": ANDROID_OS_VERSION,
+            "deviceId": _device_id(installation_id),
+        }
+        if fcm_token is not None:
+            body["pushToken"] = fcm_token
+        if include_device_type:
+            body["deviceType"] = "MOBILE_APPLICATION"
+        return body
+
+    async def register_push_device(
+        self,
+        fcm_token: str,
+        installation_id: str,
+    ) -> bool:
+        """Bind the generated FCM token to the Dom.ru account."""
+        public_body = self._push_registration_body(installation_id, fcm_token)
+        subscriber_body = self._push_registration_body(
+            installation_id,
+            fcm_token,
+            include_device_type=True,
+        )
+        succeeded = True
+        for endpoint, body, authenticated in (
+            (_DEVICE_INSTALLATIONS, public_body, False),
+            (_SUBSCRIBER_NOTIFICATIONS, subscriber_body, True),
+        ):
+            try:
+                await self._api_wrapper(
+                    url=urljoin(self.BASE_URL, endpoint),
+                    method="POST",
+                    json=body,
+                    authenticated=authenticated,
+                )
+            except Exception:  # noqa: BLE001
+                succeeded = False
+                _LOGGER.warning(
+                    "Failed to register FCM push token at %s",
+                    endpoint,
+                    exc_info=True,
+                )
+        return succeeded
+
+    async def unregister_push_device(self, installation_id: str) -> bool:
+        """Remove this integration instance from push notifications."""
+        try:
+            await self._api_wrapper(
+                url=urljoin(self.BASE_URL, _SUBSCRIBER_NOTIFICATIONS),
+                method="DELETE",
+                json=self._push_registration_body(
+                    installation_id,
+                    include_device_type=True,
+                ),
+                success_statuses=(
+                    self.HTTP_OK,
+                    self.HTTP_CREATED,
+                    self.HTTP_NO_CONTENT,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to unregister FCM push token", exc_info=True)
+            return False
+        return True
 
     async def async_get_events(
         self, place_id: str | int, limit: int = 50

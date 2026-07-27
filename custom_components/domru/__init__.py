@@ -21,6 +21,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.loader import async_get_loaded_integration
 
 from . import services
+from .access_control import (
+    access_control_target,
+    access_control_targets,
+    selected_access_control,
+    selected_access_control_matches,
+    valid_access_controls,
+)
 from .api import (
     DomruApiClient,
     DomruApiClientCommunicationError,
@@ -35,19 +42,19 @@ from .const import (
     CONF_SIP_LOCAL_IP,
     CONF_SIP_LOCAL_PORT,
     CONF_SIP_MODE,
-    CONF_SIP_POLL_INTERVAL,
-    DEFAULT_SIP_POLL_INTERVAL,
+    DEFAULT_SIP_MODE,
     DOMAIN,
     LOGGER,
     SIGNAL_CALL_STATUS_UPDATE,
     SIGNAL_COURIER_AUTO_OPEN_UPDATE,
     SIP_MODE_ON_DEMAND,
-    SIP_MODE_PERSISTENT,
 )
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .door import async_open_door
-from .sip import DomruSipClient
+from .fcm import DomruFcmListener
+from .sip import DomruSipClient, SipAccount
+from .sip_entities import async_answer_and_hangup_when_ready
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -83,8 +90,8 @@ async def async_setup_entry(
     # Authenticate first
     await client.async_authenticate()
 
-    # Load initial data to set place_id and access_control_id
-    await client.async_get_data()
+    # Load initial data to set IDs and all FCM access-control targets.
+    initial_data = await client.async_get_data()
 
     coordinator = DomruDataUpdateCoordinator(
         hass=hass,
@@ -95,7 +102,10 @@ async def async_setup_entry(
 
     # Initialize SIP client for incoming calls
     sip_client = None
+    fcm_listener = None
     event_poller: asyncio.Task[None] | None = None
+    instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
+    installation_id = _generate_installation_id(instance_id)
 
     # Check if SIP is enabled in options (default: True)
     sip_enabled = entry.options.get(CONF_SIP_ENABLED, True)
@@ -104,7 +114,13 @@ async def async_setup_entry(
         LOGGER.info("SIP is disabled in options")
     else:
         try:
-            sip_client, event_poller = await _setup_sip(hass, entry, client)
+            sip_client, event_poller = await _setup_sip(
+                hass,
+                entry,
+                client,
+                installation_id,
+                initial_data.get("access_controls", []),
+            )
         except (
             DomruApiClientError,
             DomruApiClientCommunicationError,
@@ -118,11 +134,20 @@ async def async_setup_entry(
         integration=async_get_loaded_integration(hass, entry.domain),
         coordinator=coordinator,
         sip_client=sip_client,
+        fcm_listener=fcm_listener,
         event_poller=event_poller,
+        installation_id=installation_id,
     )
 
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
     await coordinator.async_config_entry_first_refresh()
+    if sip_client:
+        _sync_sip_access_control_targets(entry)
+        entry.async_on_unload(
+            coordinator.async_add_listener(
+                lambda: _sync_sip_access_control_targets(entry)
+            )
+        )
 
     _remove_legacy_event_entity(hass, entry)
     _remove_legacy_binary_sensor_entities(hass, entry)
@@ -131,6 +156,13 @@ async def async_setup_entry(
 
     # Register services
     await services.async_setup_services(hass)
+
+    if sip_enabled:
+        fcm_listener = _setup_fcm_listener(hass, entry, client, installation_id)
+        entry.runtime_data.fcm_listener = fcm_listener
+        entry.runtime_data.fcm_start_task = hass.async_create_task(
+            fcm_listener.async_start()
+        )
 
     return True
 
@@ -170,20 +202,31 @@ async def _setup_sip(
     hass: HomeAssistant,
     entry: DomruConfigEntry,
     client: DomruApiClient,
+    installation_id: str,
+    discovered_access_controls: Any,
 ) -> tuple[DomruSipClient | None, asyncio.Task[None] | None]:
     """
     Set up SIP client and optional event poller.
 
     Returns (sip_client, event_poller_task).
     """
-    # Generate installation ID from Home Assistant instance ID
-    instance_id = hass.data.get("core.uuid") or str(uuid.uuid4())
-    installation_id = _generate_installation_id(instance_id)
-
     LOGGER.info("Getting SIP credentials with installation_id: %s", installation_id)
 
-    # Get SIP credentials
-    sip_credentials = await client.async_get_sip_credentials(installation_id)
+    sip_accounts = await _async_get_sip_accounts(
+        client,
+        installation_id,
+        discovered_access_controls,
+    )
+    primary_target = next(iter(sip_accounts), None)
+    if primary_target is not None:
+        primary_account = sip_accounts[primary_target]
+        sip_credentials = {
+            "login": primary_account.username,
+            "password": primary_account.password,
+            "realm": primary_account.realm,
+        }
+    else:
+        sip_credentials = await client.async_get_sip_credentials(installation_id)
 
     if not (
         sip_credentials.get("login")
@@ -210,9 +253,7 @@ async def _setup_sip(
     local_ip = entry.options.get(CONF_SIP_LOCAL_IP) or None
     sip_host_ip = entry.options.get(CONF_SIP_HOST_IP) or None
     local_port = entry.options.get(CONF_SIP_LOCAL_PORT, 5060)
-    sip_mode = entry.options.get(CONF_SIP_MODE, SIP_MODE_PERSISTENT)
-    poll_interval = entry.options.get(CONF_SIP_POLL_INTERVAL, DEFAULT_SIP_POLL_INTERVAL)
-
+    sip_mode = entry.options.get(CONF_SIP_MODE, DEFAULT_SIP_MODE)
     if local_ip == "":
         local_ip = None
     if sip_host_ip == "":
@@ -243,7 +284,7 @@ async def _setup_sip(
                     "call_id": call_data.get("call_id", ""),
                 },
             )
-            _schedule_courier_auto_open(hass, entry)
+            _schedule_courier_auto_open_for_sip_call(hass, entry, sip_client)
         elif event_type == "call_answered":
             hass.bus.async_fire(
                 f"{DOMAIN}_call_answered",
@@ -264,21 +305,196 @@ async def _setup_sip(
         on_call_callback=on_call_callback,
         registration_mode=sip_mode,
         server_ip=sip_host_ip,
+        place_id=primary_target[0] if primary_target else client.place_id,
+        access_control_id=(
+            primary_target[1] if primary_target else client.access_control_id
+        ),
+        access_control_targets=(
+            set(sip_accounts)
+            if sip_accounts
+            else access_control_targets(discovered_access_controls)
+        ),
+        access_control_accounts=sip_accounts,
     )
 
     # Start SIP client
     await sip_client.start()
     LOGGER.info("SIP client started successfully (mode: %s)", sip_mode)
 
-    # In on-demand mode, start event poller to detect incoming calls
     event_poller = None
     if sip_mode == SIP_MODE_ON_DEMAND:
-        event_poller = asyncio.create_task(
-            _poll_events_loop(hass, client, sip_client, poll_interval)
-        )
-        LOGGER.info("Event poller started (interval: %d seconds)", poll_interval)
+        LOGGER.info("SIP on-demand mode will register when an FCM call push arrives")
 
     return sip_client, event_poller
+
+
+async def _async_get_sip_accounts(
+    client: DomruApiClient,
+    installation_id: str,
+    discovered_access_controls: Any,
+) -> dict[tuple[str, str], SipAccount]:
+    """Load per-door SIP accounts for one serialized on-demand SIP client."""
+    accounts: dict[tuple[str, str], SipAccount] = {}
+    for access_control in valid_access_controls(discovered_access_controls):
+        target = access_control_target(access_control)
+        if target is None:
+            continue
+        credentials = await client.async_get_sip_credentials(
+            installation_id,
+            place_id=target[0],
+            access_control_id=target[1],
+        )
+        if not all(credentials.get(key) for key in ("login", "password", "realm")):
+            LOGGER.warning(
+                "SIP credentials unavailable for place_id=%s access_control_id=%s",
+                target[0],
+                target[1],
+            )
+            continue
+        accounts[target] = SipAccount(
+            realm=credentials["realm"],
+            username=credentials["login"],
+            password=credentials["password"],
+        )
+    return accounts
+
+
+def _sync_sip_access_control_targets(entry: DomruConfigEntry) -> None:
+    """Keep the single SIP client aligned with coordinator-discovered doors."""
+    data = entry.runtime_data
+    if not data.sip_client:
+        return
+    data.sip_client.set_access_control_targets(
+        access_control_targets((data.coordinator.data or {}).get("access_controls", []))
+    )
+
+
+def _setup_fcm_listener(
+    hass: HomeAssistant,
+    entry: DomruConfigEntry,
+    client: DomruApiClient,
+    installation_id: str,
+) -> DomruFcmListener:
+    """Set up the account-wide FCM listener."""
+    fcm_listener: DomruFcmListener | None = None
+
+    def on_fcm_event(event: dict[str, Any]) -> None:
+        """Handle normalized FCM doorbell events."""
+        event_type = event.get("event_type")
+        attributes = event.get("attributes") or {}
+        data = getattr(entry, "runtime_data", None)
+        sip_client = getattr(data, "sip_client", None) if data else None
+        place_id = event.get("place_id")
+        access_control_id = event.get("access_control_id")
+        sip_target_matches = bool(
+            sip_client
+            and sip_client.matches_access_control(
+                place_id,
+                access_control_id,
+            )
+        )
+        courier_target_matches = bool(
+            data
+            and selected_access_control_matches(
+                (data.coordinator.data or {}).get("access_controls", []),
+                data.courier_auto_open_access_control_id,
+                place_id,
+                access_control_id,
+            )
+        )
+
+        LOGGER.info(
+            "FCM doorbell event type=%s place_id=%s access_control_id=%s",
+            event_type,
+            place_id,
+            access_control_id,
+        )
+        if event_type == "ring":
+            sip_session_started = False
+            if sip_target_matches:
+                call_id = str(attributes.get("call_id") or "")
+                fcm_token = fcm_listener.fcm_token if fcm_listener else None
+                sip_session_started = sip_client.register_for_incoming_call(
+                    call_id=call_id or None,
+                    fcm_token=fcm_token,
+                    place_id=place_id,
+                    access_control_id=access_control_id,
+                )
+            hass.bus.async_fire(
+                f"{DOMAIN}_incoming_call",
+                {
+                    "from": attributes.get("gate_name") or "FCM",
+                    "call_id": attributes.get("call_id") or "",
+                    "source": "fcm",
+                    "place_id": event.get("place_id", ""),
+                    "access_control_id": event.get("access_control_id", ""),
+                },
+            )
+            if courier_target_matches and sip_session_started:
+                _schedule_courier_auto_open(hass, entry)
+        elif event_type == "ended":
+            call_id = str(attributes.get("call_id") or "")
+            if sip_target_matches and sip_client.is_current_fcm_call(
+                call_id,
+                place_id,
+                access_control_id,
+            ):
+                sip_client.hangup_call()
+                sip_client.end_fcm_call_session()
+            hass.bus.async_fire(
+                f"{DOMAIN}_call_ended",
+                {
+                    "source": "fcm",
+                    "call_id": call_id,
+                    "place_id": event.get("place_id", ""),
+                    "access_control_id": event.get("access_control_id", ""),
+                },
+            )
+
+        async_dispatcher_send(hass, SIGNAL_CALL_STATUS_UPDATE)
+
+    fcm_listener = DomruFcmListener(
+        hass,
+        entry,
+        client,
+        installation_id,
+        on_event=on_fcm_event,
+    )
+    return fcm_listener
+
+
+def _schedule_courier_auto_open_for_sip_call(
+    hass: HomeAssistant,
+    entry: DomruConfigEntry,
+    sip_client: DomruSipClient,
+) -> None:
+    """Schedule courier auto-open only when the SIP call target is unambiguous."""
+    data = entry.runtime_data
+    if not data.courier_auto_open_enabled:
+        return
+
+    access_controls = (data.coordinator.data or {}).get("access_controls", [])
+    current_target = sip_client.current_fcm_target
+    if current_target is not None:
+        if selected_access_control_matches(
+            access_controls,
+            data.courier_auto_open_access_control_id,
+            current_target[0],
+            current_target[1],
+        ):
+            _schedule_courier_auto_open(hass, entry)
+        return
+
+    targets = access_control_targets(access_controls)
+    if len(targets) == 1:
+        _schedule_courier_auto_open(hass, entry)
+        return
+
+    LOGGER.warning(
+        "Courier auto-open remains armed because an incoming SIP call could not "
+        "be matched to one of %d access controls",
+        len(targets),
+    )
 
 
 def _schedule_courier_auto_open(
@@ -305,7 +521,7 @@ async def _async_courier_auto_open(
     data = entry.runtime_data
     try:
         if data.sip_client:
-            data.sip_client.answer_and_hangup()
+            await async_answer_and_hangup_when_ready(data.sip_client)
 
         selected_access_control_id = _selected_courier_access_control_id(
             data.coordinator.data,
@@ -329,75 +545,6 @@ async def _async_courier_auto_open(
         async_dispatcher_send(hass, SIGNAL_COURIER_AUTO_OPEN_UPDATE)
 
 
-async def _poll_events_loop(
-    hass: HomeAssistant,
-    client: DomruApiClient,
-    sip_client: DomruSipClient,
-    interval: int,
-) -> None:
-    """
-    Poll API events to detect incoming calls for on-demand SIP.
-
-    When a call event is detected, triggers immediate SIP registration
-    so the server can route the INVITE to us.
-    """
-    last_event_id: str | None = None
-    call_event_types = {
-        "accessControlCallAccepted",
-        "accessControlCallRejected",
-        "accessControlCallMissed",
-        "accessControlCallIncoming",
-    }
-
-    LOGGER.info("Event polling loop started (interval=%ds)", interval)
-
-    while True:
-        try:
-            await asyncio.sleep(interval)
-
-            # Skip if HA is shutting down
-            if hass.is_stopping:
-                break
-
-            # Don't poll if already in a call
-            if sip_client.call_status != "idle":
-                continue
-
-            # Fetch latest events
-            events = await client.async_get_events(
-                client._place_id,  # noqa: SLF001
-                limit=5,
-            )
-
-            if not events:
-                continue
-
-            latest = events[0]
-            event_id = str(latest.get("id", ""))
-            event_type = latest.get("eventTypeName", "")
-
-            # Check if this is a new call-related event
-            if event_id and event_id != last_event_id:
-                last_event_id = event_id
-
-                if event_type in call_event_types:
-                    LOGGER.info(
-                        "Detected call event via API: %s (id=%s), "
-                        "triggering SIP registration",
-                        event_type,
-                        event_id,
-                    )
-                    sip_client.register_now()
-
-        except asyncio.CancelledError:
-            LOGGER.info("Event polling loop cancelled")
-            break
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Error in event polling loop", exc_info=True)
-            # Continue polling even on errors
-            await asyncio.sleep(interval)
-
-
 def _generate_installation_id(instance_id: str) -> str:
     """Generate installation ID based on Home Assistant instance ID."""
     h = hashlib.sha256(instance_id.encode()).hexdigest()
@@ -417,18 +564,11 @@ def _selected_courier_access_control_id(
     if selected_access_control_id is None:
         return None
 
-    access_controls = coordinator_data.get("access_controls", [])
-    if not isinstance(access_controls, list):
-        return None
-
-    for access_control in access_controls:
-        if not isinstance(access_control, dict):
-            continue
-        access_control_id = access_control.get("id")
-        if str(access_control_id) == str(selected_access_control_id):
-            return access_control_id
-
-    return None
+    access_control = selected_access_control(
+        coordinator_data.get("access_controls", []),
+        selected_access_control_id,
+    )
+    return access_control.get("id") if access_control else None
 
 
 async def async_unload_entry(
@@ -436,6 +576,22 @@ async def async_unload_entry(
     entry: DomruConfigEntry,
 ) -> bool:
     """Handle removal of an entry."""
+    if entry.runtime_data.fcm_start_task:
+        if not entry.runtime_data.fcm_start_task.done():
+            entry.runtime_data.fcm_start_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await entry.runtime_data.fcm_start_task
+        entry.runtime_data.fcm_start_task = None
+
+    if entry.runtime_data.fcm_listener:
+        await entry.runtime_data.fcm_listener.async_stop()
+        LOGGER.info("FCM listener stopped")
+
+        if entry.runtime_data.installation_id:
+            await entry.runtime_data.client.unregister_push_device(
+                entry.runtime_data.installation_id
+            )
+
     # Cancel event poller if running
     if entry.runtime_data.event_poller:
         entry.runtime_data.event_poller.cancel()
