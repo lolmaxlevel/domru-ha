@@ -53,6 +53,7 @@ from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .door import async_open_door
 from .fcm import DomruFcmListener
+from .media import async_setup_camera_audio
 from .sip import DomruSipClient, SipAccount
 from .sip_entities import async_answer_and_hangup_when_ready
 
@@ -92,6 +93,9 @@ async def async_setup_entry(
 
     # Load initial data to set IDs and all FCM access-control targets.
     initial_data = await client.async_get_data()
+
+    # Enable Home Assistant's optional WebRTC provider before camera entities load.
+    await async_setup_camera_audio(hass)
 
     coordinator = DomruDataUpdateCoordinator(
         hass=hass,

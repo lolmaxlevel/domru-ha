@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 
@@ -20,6 +22,9 @@ if TYPE_CHECKING:
     from .data import DomruConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+_GO2RTC_SESSION_WAIT_TIMEOUT = 10
+_HA_MANAGED_GO2RTC_URL = "http://localhost:11984"
+_HA_MANAGED_GO2RTC_RTSP_URL = "rtsp://127.0.0.1:18554"
 
 
 async def async_setup_entry(
@@ -76,10 +81,16 @@ class DomruCamera(DomruEntity, Camera):
     ) -> None:
         """Initialize the camera class."""
         super().__init__(coordinator)
+        # CoordinatorEntity does not continue cooperative initialization to Camera.
+        Camera.__init__(self)
         self._client = client
         self._camera_id = camera_id
         self._camera_data = camera_data
         self._has_sound = has_sound
+        self._audio_proxy_logged = False
+        self._audio_stream_name = (
+            f"domru_{coordinator.config_entry.entry_id}_{camera_id}"
+        )
         self._attr_name = camera_name
         self._snapshot_type = snapshot_type
         self._place_id = place_id
@@ -102,20 +113,37 @@ class DomruCamera(DomruEntity, Camera):
         # Отключаем автоматическое обновление снимков, используем только стрим
         self._attr_is_streaming = True
 
-        stream_opts: dict[str, str | bool | float] = {
-            "rtsp_transport": "tcp",  # Используем TCP для стабильности
-        }
-
         if has_sound:
-            # Явно указываем что нужно обрабатывать аудио дорожку
-            stream_opts["audio_codec"] = "copy"  # Копировать аудио без перекодирования
-            _LOGGER.info("Audio enabled in stream options for camera %s", camera_id)
+            _LOGGER.info("Camera %s reports audio support", camera_id)
 
-        # Устанавливаем stream_options перед Camera.__init__
-        self.stream_options = stream_opts
+        # Dom.ru returns HTTPS/FLV, so RTSP-specific PyAV options must stay unset.
+        self.stream_options = {}
 
-        # Теперь вызываем Camera.__init__ который не перезапишет stream_options
-        Camera.__init__(self)
+    async def async_on_webrtc_candidate(
+        self, session_id: str, candidate: object
+    ) -> None:
+        """Preserve early ICE candidates while go2rtc prepares the source."""
+        provider = self._webrtc_provider
+        sessions = getattr(provider, "_sessions", None) if provider else None
+        if (
+            provider
+            and provider.domain == "go2rtc"
+            and isinstance(sessions, dict)
+            and session_id not in sessions
+        ):
+            _LOGGER.debug("Waiting for go2rtc WebRTC session %s", session_id)
+            try:
+                async with asyncio.timeout(_GO2RTC_SESSION_WAIT_TIMEOUT):
+                    # The core provider exposes no readiness event; its private
+                    # session map is the only observable race boundary.
+                    while session_id not in sessions:  # noqa: ASYNC110
+                        await asyncio.sleep(0.01)
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Timed out waiting for go2rtc WebRTC session %s", session_id
+                )
+
+        await super().async_on_webrtc_candidate(session_id, candidate)
 
     async def stream_source(self) -> str | None:
         """Return the source of the stream (RTSP URL)."""
@@ -128,15 +156,14 @@ class DomruCamera(DomruEntity, Camera):
         if not self._enable_cache:
             try:
                 _LOGGER.debug(
-                    "Fetching fresh RTSP stream URL for camera %s", self._camera_id
+                    "Fetching fresh stream URL for camera %s", self._camera_id
                 )
                 url = await self._client.async_get_camera_stream_url(self._camera_id)
                 _LOGGER.info(
-                    "Got RTSP stream URL for camera %s: %s",
+                    "Got stream URL for camera %s",
                     self._camera_id,
-                    url,
                 )
-                return url
+                return await self._async_source_with_audio_proxy(url)
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception(
                     "Error getting stream URL for camera %s", self._camera_id
@@ -151,7 +178,7 @@ class DomruCamera(DomruEntity, Camera):
         ):
             try:
                 _LOGGER.debug(
-                    "Fetching RTSP stream URL for camera %s (cache expired)",
+                    "Fetching stream URL for camera %s (cache expired)",
                     self._camera_id,
                 )
                 self._stream_url = await self._client.async_get_camera_stream_url(
@@ -159,16 +186,54 @@ class DomruCamera(DomruEntity, Camera):
                 )
                 self._stream_url_time = current_time
                 _LOGGER.info(
-                    "Got RTSP stream URL for camera %s: %s",
+                    "Got stream URL for camera %s",
                     self._camera_id,
-                    self._stream_url,
                 )
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception(
                     "Error getting stream URL for camera %s", self._camera_id
                 )
                 return None
-        return self._stream_url
+        if self._stream_url is None:
+            return None
+        return await self._async_source_with_audio_proxy(self._stream_url)
+
+    async def _async_source_with_audio_proxy(self, source_url: str) -> str:
+        """Prepare a managed go2rtc stream with browser-compatible audio."""
+        provider = self._webrtc_provider
+        if (
+            not self._has_sound
+            or provider is None
+            or provider.domain != "go2rtc"
+            or str(getattr(provider, "_url", "")).rstrip("/") != _HA_MANAGED_GO2RTC_URL
+        ):
+            return source_url
+
+        rest_client = getattr(provider, "_rest_client", None)
+        streams = getattr(rest_client, "streams", None)
+        add_stream = getattr(streams, "add", None)
+        if not callable(add_stream):
+            return source_url
+
+        stream_name = self._audio_stream_name
+        go2rtc_source = f"ffmpeg:{source_url}#video=copy#audio=aac#audio=opus"
+        try:
+            await add_stream(stream_name, go2rtc_source)
+        except Exception as err:  # noqa: BLE001  # pylint: disable=broad-except
+            _LOGGER.warning(
+                "Camera %s audio proxy failed; using direct stream fallback (%s)",
+                self._camera_id,
+                type(err).__name__,
+            )
+            return source_url
+
+        if not self._audio_proxy_logged:
+            self._audio_proxy_logged = True
+            _LOGGER.info(
+                "Camera %s managed go2rtc audio proxy is ready",
+                self._camera_id,
+            )
+        return f"{_HA_MANAGED_GO2RTC_RTSP_URL}/{quote(stream_name, safe='')}"
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -209,7 +274,7 @@ class DomruCamera(DomruEntity, Camera):
             "snapshot_type": self._snapshot_type,
             "place_id": self._place_id,
             "access_control_id": self._access_control_id,
-            "has_sound": self._camera_data.get("IsSound") == 1,
+            "has_sound": self._has_sound,
             "is_active": self._camera_data.get("IsActive") == 1,
             "state": "online" if self._camera_data.get("State") == 1 else "offline",
             "motion_detector": self._camera_data.get("MotionDetectorMode"),

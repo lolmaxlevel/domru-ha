@@ -4,6 +4,9 @@
   "codeowners": [
     "@lolmaxlevel"
   ],
+  "after_dependencies": [
+    "go2rtc"
+  ],
   "config_flow": true,
   "dependencies": [
     "stream"
@@ -14,5 +17,5 @@
   "requirements": [
     "firebase-messaging>=0.4"
   ],
-  "version": "1.5.0"
+  "version": "1.6.0"
 }

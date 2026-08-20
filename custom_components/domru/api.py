@@ -692,7 +692,21 @@ class DomruApiClient:
             raise DomruApiClientCommunicationError(msg) from exception
 
     async def async_get_camera_stream_url(self, camera_id: str | int) -> str:
-        """Get camera stream URL (RTSP format)."""
+        """Refresh the camera session and get its temporary stream URL."""
+        try:
+            refreshed = await self.async_refresh_camera_stream_session(camera_id)
+            if not refreshed:
+                _LOGGER.warning(
+                    "Dom.ru did not refresh the media session for camera %s",
+                    camera_id,
+                )
+        except (DomruApiClientError, DomruApiClientCommunicationError):
+            _LOGGER.warning(
+                "Failed to refresh the media session for camera %s; "
+                "requesting a stream URL anyway",
+                camera_id,
+            )
+
         url = urljoin(
             self.BASE_URL, f"rest/v1/forpost/cameras/{camera_id}/video?LightStream=0"
         )
@@ -743,6 +757,20 @@ class DomruApiClient:
                 return response["URL"]
 
         return str(response) if response else ""
+
+    async def async_refresh_camera_stream_session(
+        self,
+        camera_id: str | int,
+    ) -> bool:
+        """Refresh the upstream media session for a camera."""
+        url = urljoin(
+            self.BASE_URL,
+            "api/mh-camera-personal/mobile/v1/video/"
+            f"refresh-user-session?externalCameraId={camera_id}",
+        )
+        response = await self._api_wrapper(url=url, method="PUT")
+        data = response.get("data") if isinstance(response, dict) else None
+        return isinstance(data, dict) and data.get("status") is True
 
     async def async_get_sip_credentials(
         self,
