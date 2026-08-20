@@ -1,11 +1,11 @@
 {
   "domain": "domru",
   "name": "Dom.ru Smart Intercom",
-  "codeowners": [
-    "@lolmaxlevel"
-  ],
   "after_dependencies": [
     "go2rtc"
+  ],
+  "codeowners": [
+    "@lolmaxlevel"
   ],
   "config_flow": true,
   "dependencies": [

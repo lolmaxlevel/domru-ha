@@ -9,6 +9,14 @@ from pathlib import Path
 
 
 class ManifestTests(unittest.TestCase):
+    def test_keys_follow_hassfest_order(self) -> None:
+        manifest = json.loads(
+            Path("custom_components/domru/manifest.json").read_text(encoding="utf-8")
+        )
+
+        keys = list(manifest)
+        self.assertEqual(keys, ["domain", "name", *sorted(keys[2:])])
+
     def test_go2rtc_is_an_optional_after_dependency(self) -> None:
         manifest = json.loads(
             Path("custom_components/domru/manifest.json").read_text(encoding="utf-8")
