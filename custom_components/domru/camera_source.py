@@ -15,8 +15,16 @@ def _value(data: dict[str, Any], *keys: str) -> Any:
 
 def camera_sources_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Return camera entity source definitions from coordinator data."""
+    cameras = data.get("cameras", [])
+    cameras_by_id = {
+        str(camera_id): camera
+        for camera in cameras
+        if isinstance(camera, dict)
+        and (camera_id := _value(camera, "ID", "id")) is not None
+    }
     access_control_sources = _access_control_camera_sources(
-        data.get("access_controls", [])
+        data.get("access_controls", []),
+        cameras_by_id=cameras_by_id,
     )
     access_control_camera_ids = {
         str(source["camera_id"])
@@ -24,7 +32,7 @@ def camera_sources_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
         if source.get("camera_id") is not None
     }
     sources = _camera_sources(
-        data.get("cameras", []),
+        cameras,
         exclude_camera_ids=access_control_camera_ids,
     )
     return sources + access_control_sources
@@ -65,7 +73,11 @@ def _camera_sources(
     return sources
 
 
-def _access_control_camera_sources(access_controls: Any) -> list[dict[str, Any]]:
+def _access_control_camera_sources(
+    access_controls: Any,
+    *,
+    cameras_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Return access-control snapshot camera source definitions."""
     if not isinstance(access_controls, list):
         return []
@@ -83,6 +95,7 @@ def _access_control_camera_sources(access_controls: Any) -> list[dict[str, Any]]
             continue
 
         camera_id = _value(access_control, "externalCameraId", "external_camera_id")
+        camera_data = cameras_by_id.get(str(camera_id), {})
         name = access_control.get("name") or f"Access control {access_control_id}"
         unique_id = (
             f"camera_{camera_id}"
@@ -94,8 +107,8 @@ def _access_control_camera_sources(access_controls: Any) -> list[dict[str, Any]]
                 "unique_id": unique_id,
                 "camera_id": camera_id,
                 "name": name,
-                "data": access_control,
-                "has_sound": False,
+                "data": {**camera_data, **access_control},
+                "has_sound": camera_data.get("IsSound") == 1,
                 "snapshot": "access_control",
                 "place_id": place_id,
                 "access_control_id": access_control_id,
