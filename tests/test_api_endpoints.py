@@ -1,4 +1,4 @@
-# ruff: noqa: D102,D107,EM102,TRY003,PT009,S106
+# ruff: noqa: D102,D107,EM102,PT009,PT027,S106,TRY003
 """Tests for Dom.ru API endpoint selection."""
 
 from __future__ import annotations
@@ -159,6 +159,14 @@ class ApiEndpointTests(unittest.TestCase):
             client.requests[1]["url"],
         )
 
+    def test_async_get_data_propagates_primary_discovery_failure(self) -> None:
+        client = CapturingClient(
+            responses=[api_module.DomruApiClientCommunicationError("offline")]
+        )
+
+        with self.assertRaises(api_module.DomruApiClientCommunicationError):
+            asyncio.run(client.async_get_data())
+
     def test_get_cameras_prefers_place_scoped_endpoint(self) -> None:
         client = CapturingClient(responses=[{"data": [{"id": "camera-1"}]}])
         client.set_ids(place_id="place-1")
@@ -182,6 +190,41 @@ class ApiEndpointTests(unittest.TestCase):
         self.assertEqual(cameras, [{"ID": "camera-1"}])
         self.assertIn("rest/v1/places/place-1/cameras", client.requests[0]["url"])
         self.assertIn("rest/v1/forpost/cameras", client.requests[1]["url"])
+
+    def test_get_camera_stream_refreshes_session_before_requesting_url(self) -> None:
+        client = CapturingClient(
+            responses=[
+                {"data": {"status": True, "errorCode": None}},
+                {"data": {"URL": "https://stream.example.test/live"}},
+            ]
+        )
+
+        stream_url = asyncio.run(client.async_get_camera_stream_url("camera-1"))
+
+        self.assertEqual(stream_url, "https://stream.example.test/live")
+        self.assertEqual(
+            [request["method"] for request in client.requests],
+            ["PUT", "GET"],
+        )
+        self.assertIn("refresh-user-session", client.requests[0]["url"])
+        self.assertIn("externalCameraId=camera-1", client.requests[0]["url"])
+        self.assertIn("LightStream=0", client.requests[1]["url"])
+
+    def test_get_camera_stream_falls_back_when_session_refresh_fails(self) -> None:
+        client = CapturingClient(
+            responses=[
+                api_module.DomruApiClientCommunicationError("refresh failed"),
+                {"data": {"URL": "https://stream.example.test/live"}},
+            ]
+        )
+
+        with self.assertLogs("domru_api_for_tests", level="WARNING"):
+            stream_url = asyncio.run(client.async_get_camera_stream_url("camera-1"))
+
+        self.assertEqual(stream_url, "https://stream.example.test/live")
+        self.assertEqual(len(client.requests), 2)
+        self.assertIn("refresh-user-session", client.requests[0]["url"])
+        self.assertIn("LightStream=0", client.requests[1]["url"])
 
     def test_async_open_door_uses_forpost_endpoint_for_forpost_device(self) -> None:
         client = CapturingClient()

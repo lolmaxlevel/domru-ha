@@ -90,6 +90,7 @@ class CameraSourceTests(unittest.TestCase):
                     {
                         "ID": 18616643,
                         "Name": "Forpost duplicate",
+                        "IsSound": 1,
                     }
                 ],
                 "access_controls": [
@@ -108,6 +109,8 @@ class CameraSourceTests(unittest.TestCase):
         self.assertEqual(sources[0]["unique_id"], "camera_18616643")
         self.assertEqual(sources[0]["snapshot"], "access_control")
         self.assertEqual(sources[0]["access_control_id"], 5676)
+        self.assertTrue(sources[0]["has_sound"])
+        self.assertEqual(sources[0]["data"]["IsSound"], 1)
 
 
 if __name__ == "__main__":

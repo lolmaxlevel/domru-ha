@@ -101,7 +101,7 @@ class FakeResponse:
 class FakeSession:
     """Capture outgoing API requests and return queued responses."""
 
-    def __init__(self, *responses: FakeResponse) -> None:
+    def __init__(self, *responses: FakeResponse | Exception) -> None:
         self.responses = list(responses)
         self.requests: list[dict[str, Any]] = []
 
@@ -121,7 +121,10 @@ class FakeSession:
                 "headers": headers or {},
             }
         )
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class ApiPhoneLoginTests(unittest.TestCase):
@@ -143,6 +146,112 @@ class ApiPhoneLoginTests(unittest.TestCase):
         asyncio.run(client.async_authenticate())
 
         self.assertEqual(session.requests, [])
+
+    def test_unauthorized_request_refreshes_token_before_replaying(self) -> None:
+        session = FakeSession(
+            FakeResponse({"error": "expired"}, status=401),
+            FakeResponse(
+                {
+                    "accessToken": "new-access",
+                    "refreshToken": "new-refresh",
+                    "operatorId": 321,
+                }
+            ),
+            FakeResponse({"data": [{"place": {"id": "place-1"}}]}),
+        )
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            access_token="expired-access",
+            refresh_token="old-refresh",
+            operator_id=123,
+        )
+
+        places = asyncio.run(client.get_subscriber_places())
+
+        self.assertEqual(places, [{"place": {"id": "place-1"}}])
+        self.assertEqual(len(session.requests), 3)
+        self.assertTrue(session.requests[1]["url"].endswith("/auth/v2/session/refresh"))
+        self.assertEqual(session.requests[1]["headers"]["Bearer"], "old-refresh")
+        self.assertEqual(
+            session.requests[2]["headers"]["Authorization"],
+            "Bearer new-access",
+        )
+
+    def test_timeout_during_token_refresh_remains_a_temporary_failure(self) -> None:
+        session = FakeSession(
+            FakeResponse({"error": "expired"}, status=401),
+            TimeoutError(),
+        )
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            access_token="expired-access",
+            refresh_token="old-refresh",
+            operator_id=123,
+        )
+
+        try:
+            asyncio.run(client.get_subscriber_places())
+        except api_module.DomruApiClientError as exception:
+            self.assertIsInstance(
+                exception,
+                api_module.DomruApiClientCommunicationError,
+            )
+        else:
+            self.fail("Token refresh timeout did not fail the request")
+
+    def test_rejected_refresh_token_is_an_authentication_failure(self) -> None:
+        session = FakeSession(
+            FakeResponse({"error": "expired"}, status=401),
+            FakeResponse({"error": "invalid_refresh_token"}, status=401),
+        )
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            access_token="expired-access",
+            refresh_token="expired-refresh",
+            operator_id=123,
+        )
+
+        try:
+            asyncio.run(client.get_subscriber_places())
+        except api_module.DomruApiClientError as exception:
+            self.assertIsInstance(
+                exception,
+                api_module.DomruApiClientAuthenticationError,
+            )
+        else:
+            self.fail("Rejected refresh token did not fail authentication")
+
+    def test_request_is_not_retried_after_refreshed_token_is_rejected(self) -> None:
+        session = FakeSession(
+            FakeResponse({"error": "expired"}, status=401),
+            FakeResponse(
+                {
+                    "accessToken": "new-access",
+                    "refreshToken": "new-refresh",
+                    "operatorId": 321,
+                }
+            ),
+            FakeResponse({"error": "still_unauthorized"}, status=401),
+        )
+        client = DomruApiClient(
+            username=None,
+            password=None,
+            session=session,
+            access_token="expired-access",
+            refresh_token="old-refresh",
+            operator_id=123,
+        )
+
+        with self.assertRaises(api_module.DomruApiClientAuthenticationError):
+            asyncio.run(client.get_subscriber_places())
+
+        self.assertEqual(len(session.requests), 3)
 
     def test_get_phone_accounts_escapes_phone_number(self) -> None:
         session = FakeSession(FakeResponse([{"accountId": "account-1"}]))
@@ -467,6 +576,35 @@ class ApiPhoneLoginTests(unittest.TestCase):
 
         self.assertEqual(client.refresh_token, "new-refresh")
         self.assertEqual(client.operator_id, 321)
+
+    def test_refresh_notifies_consumer_about_rotated_credentials(self) -> None:
+        session = FakeSession(
+            FakeResponse(
+                {
+                    "accessToken": "new-access",
+                    "refreshToken": "new-refresh",
+                    "operatorId": 321,
+                }
+            )
+        )
+        auth_updates: list[tuple[str, str, int]] = []
+        try:
+            client = DomruApiClient(
+                username=None,
+                password=None,
+                session=session,
+                refresh_token="old-refresh",
+                operator_id=123,
+                on_auth_update=lambda access, refresh, operator: auth_updates.append(
+                    (access, refresh, operator)
+                ),
+            )
+        except TypeError as exception:
+            self.fail(f"API client does not expose auth updates: {exception}")
+
+        asyncio.run(client.async_authenticate())
+
+        self.assertEqual(auth_updates, [("new-access", "new-refresh", 321)])
 
 
 if __name__ == "__main__":

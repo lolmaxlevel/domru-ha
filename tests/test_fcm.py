@@ -24,7 +24,7 @@ def _install_homeassistant_stubs() -> None:
     core.HomeAssistant = object
     core.callback = lambda func: func
     dispatcher.async_dispatcher_send = lambda *_args, **_kwargs: None
-    event.async_track_time_interval = lambda *_args, **_kwargs: (lambda: None)
+    event.async_track_time_interval = lambda *_args, **_kwargs: lambda: None
 
     sys.modules.setdefault("homeassistant", homeassistant)
     sys.modules.setdefault("homeassistant.config_entries", config_entries)
