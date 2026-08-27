@@ -1,0 +1,12 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+ANTHROPIC_BASE_URL = "http://192.168.31.109:8045"
+ANTHROPIC_AUTH_TOKEN = "sk-fa21bd05103d42878e2e2b796d6198eb"
+ANTHROPIC_MODEL = "gemini-3-pro-high"
+ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3-pro-high"
+ANTHROPIC_SMALL_FAST_MODEL = "gemini-3-flash"
+ANTHROPIC_DEFAULT_HAIKU_MODEL = "gemini-3-flash"
+DISABLE_NON_ESSENTIAL_MODEL_CALLS = "1"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"

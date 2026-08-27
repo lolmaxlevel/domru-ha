@@ -32,6 +32,9 @@
                     "sms_code": "SMS code"
                 }
             },
+            "reauth_confirm": {
+                "description": "Your Dom.ru session has expired. Continue to sign in again."
+            },
             "init": {
                 "description": "Configure camera stream options",
                 "data": {
@@ -47,7 +50,8 @@
             "unknown": "Unknown error occurred."
         },
         "abort": {
-            "already_configured": "This entry is already configured."
+            "already_configured": "This entry is already configured.",
+            "reauth_successful": "Dom.ru authentication was updated successfully."
         }
     },
     "options": {
