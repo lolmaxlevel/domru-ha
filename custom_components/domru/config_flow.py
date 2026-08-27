@@ -92,6 +92,29 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_reauth(
+        self,
+        _entry_data: dict,
+    ) -> config_entries.ConfigFlowResult:
+        """Start reauthentication for an entry with expired credentials."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict | None = None,
+    ) -> config_entries.ConfigFlowResult:
+        """Confirm reauthentication before collecting fresh credentials."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reauth_confirm",
+                data_schema=vol.Schema({}),
+            )
+
+        entry = self._get_reauth_entry()
+        if entry.data.get(CONF_AUTH_METHOD) == AUTH_METHOD_PHONE:
+            return await self.async_step_phone()
+        return await self.async_step_password()
+
     async def async_step_password(
         self,
         user_input: dict | None = None,
@@ -114,18 +137,12 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 LOGGER.exception(exception)
                 _errors["base"] = "unknown"
             else:
-                await self.async_set_unique_id(
-                    ## Do NOT use this in production code
-                    ## The unique_id should never be something that can change
-                    ## https://developers.home-assistant.io/docs/config_entries_config_flow_handler#unique-ids
-                    unique_id=slugify(user_input[CONF_USERNAME])
-                )
-                self._abort_if_unique_id_configured()
                 data = dict(user_input)
                 data[CONF_AUTH_METHOD] = AUTH_METHOD_PASSWORD
-                return self.async_create_entry(
+                return await self._async_finish_entry(
                     title=user_input[CONF_USERNAME],
                     data=data,
+                    unique_id=slugify(user_input[CONF_USERNAME]),
                 )
 
         return self.async_show_form(
@@ -291,9 +308,7 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 _errors["base"] = ERROR_API
             else:
                 account_id = self._selected_account.get("accountId", self._phone)
-                await self.async_set_unique_id(slugify(str(account_id)))
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
+                return await self._async_finish_entry(
                     title=_account_label(self._selected_account),
                     data={
                         CONF_AUTH_METHOD: AUTH_METHOD_PHONE,
@@ -303,6 +318,7 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_REFRESH_TOKEN: refresh_token,
                         CONF_OPERATOR_ID: operator_id,
                     },
+                    unique_id=slugify(str(account_id)),
                 )
 
         return self.async_show_form(
@@ -338,6 +354,31 @@ class DomruFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             password=None,
             session=async_create_clientsession(self.hass),
         )
+
+    async def _async_finish_entry(
+        self,
+        *,
+        title: str,
+        data: dict,
+        unique_id: str,
+    ) -> config_entries.ConfigFlowResult:
+        """Create a new entry or replace credentials during reauthentication."""
+        await self.async_set_unique_id(unique_id)
+        if self.source == config_entries.SOURCE_REAUTH:
+            self._abort_if_unique_id_mismatch()
+            reauth_entry = self._get_reauth_entry()
+            if update_and_abort := getattr(self, "async_update_and_abort", None):
+                return update_and_abort(
+                    reauth_entry,
+                    data_updates=data,
+                )
+            return self.async_update_reload_and_abort(
+                reauth_entry,
+                data_updates=data,
+            )
+
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(title=title, data=data)
 
     async def _async_request_phone_confirmation(self) -> tuple[str, str] | None:
         """Request SMS confirmation and return a config flow error key on failure."""

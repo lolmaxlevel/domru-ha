@@ -1,4 +1,4 @@
-# ruff: noqa: D102,D107,EM102,TRY003,PT009,S106
+# ruff: noqa: D102,D107,EM102,PT009,PT027,S106,TRY003
 """Tests for Dom.ru API endpoint selection."""
 
 from __future__ import annotations
@@ -158,6 +158,14 @@ class ApiEndpointTests(unittest.TestCase):
             "rest/v1/places/place-1/accesscontrols",
             client.requests[1]["url"],
         )
+
+    def test_async_get_data_propagates_primary_discovery_failure(self) -> None:
+        client = CapturingClient(
+            responses=[api_module.DomruApiClientCommunicationError("offline")]
+        )
+
+        with self.assertRaises(api_module.DomruApiClientCommunicationError):
+            asyncio.run(client.async_get_data())
 
     def test_get_cameras_prefers_place_scoped_endpoint(self) -> None:
         client = CapturingClient(responses=[{"data": [{"id": "camera-1"}]}])
