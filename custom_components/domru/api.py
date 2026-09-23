@@ -9,11 +9,14 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from json.decoder import JSONDecodeError
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urljoin
 
 import aiohttp
 from aiohttp.client_exceptions import ClientConnectorError, ContentTypeError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 try:
     from async_timeout import timeout as async_timeout
@@ -155,6 +158,7 @@ class DomruApiClient:
         access_token: str | None = None,
         refresh_token: str | None = None,
         operator_id: str | int | None = None,
+        on_auth_update: Callable[[str, str, str | int], None] | None = None,
     ) -> None:
         """Initialize the API client."""
         self._username = username
@@ -163,6 +167,7 @@ class DomruApiClient:
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._operator_id = operator_id
+        self._on_auth_update = on_auth_update
         self._place_id: str | int | None = None
         self._access_control_id: str | int | None = None
         # Hash parameters from go-impl/pkg/auth/password.go
@@ -219,15 +224,14 @@ class DomruApiClient:
         if self._access_token is not None:
             return
 
+        refresh_auth_error: DomruApiClientAuthenticationError | None = None
         if self._refresh_token is not None and self._operator_id is not None:
             # Try to refresh token first
             try:
                 await self._refresh_access_token()
-            except (
-                DomruApiClientError,
-                DomruApiClientCommunicationError,
-            ):  # pylint: disable=broad-except
-                _LOGGER.debug("Failed to refresh access token")
+            except DomruApiClientAuthenticationError as exception:
+                refresh_auth_error = exception
+                _LOGGER.debug("Stored session can no longer be refreshed")
             else:
                 return
 
@@ -265,6 +269,8 @@ class DomruApiClient:
             if not self._access_token:
                 msg = "No access token in response"
                 raise DomruApiClientAuthenticationError(msg)
+        elif refresh_auth_error is not None:
+            raise refresh_auth_error
         else:
             msg = "No credentials provided"
             raise DomruApiClientAuthenticationError(msg)
@@ -284,6 +290,9 @@ class DomruApiClient:
             method="GET",
             headers=headers,
             authenticated=False,
+            status_messages={
+                self.HTTP_UNAUTHORIZED: "Stored session has expired.",
+            },
         )
         auth_data = _auth_response_data(result)
 
@@ -294,6 +303,22 @@ class DomruApiClient:
         if not self._access_token:
             msg = "No access token in refresh response"
             raise DomruApiClientAuthenticationError(msg)
+
+        self._notify_auth_update()
+
+    def _notify_auth_update(self) -> None:
+        """Notify the integration when the API rotates stored credentials."""
+        if (
+            self._on_auth_update is not None
+            and self._access_token
+            and self._refresh_token
+            and self._operator_id is not None
+        ):
+            self._on_auth_update(
+                self._access_token,
+                self._refresh_token,
+                self._operator_id,
+            )
 
     async def async_get_phone_accounts(self, phone: str) -> list[dict[str, Any]]:
         """Get accounts available for a phone number."""
@@ -395,15 +420,9 @@ class DomruApiClient:
             "events": [],
         }
 
-        # Get subscriber places
-        try:
-            await self._async_add_places_and_access_controls(data)
-        except (
-            DomruApiClientError,
-            DomruApiClientCommunicationError,
-            TimeoutError,
-        ):  # pylint: disable=broad-except
-            _LOGGER.debug("Failed to get subscriber places")
+        # Subscriber places are the primary discovery call. Propagate failures so
+        # Home Assistant can distinguish reauthentication from a temporary outage.
+        await self._async_add_places_and_access_controls(data)
 
         # Get cameras
         try:
@@ -989,6 +1008,19 @@ class DomruApiClient:
         """Handle a request-specific authentication error."""
         raise DomruApiClientAuthenticationError(message)
 
+    async def _async_refresh_after_unauthorized(
+        self,
+        *,
+        token_refreshed: bool,
+    ) -> None:
+        """Refresh once after a 401 or raise when the replay was also rejected."""
+        if token_refreshed:
+            self._handle_authentication_error(
+                "Unauthorized after refreshing access token"
+            )
+        self._access_token = None
+        await self._set_access_token()
+
     async def _parse_response(
         self,
         response: aiohttp.ClientResponse,
@@ -1025,6 +1057,7 @@ class DomruApiClient:
         """Make an API request with automatic token refresh on 401."""
         allowed_statuses = success_statuses or (self.HTTP_OK, self.HTTP_CREATED)
         parse_statuses = (*allowed_statuses, *(status_messages or {}))
+        token_refreshed = False
         while True:
             try:
                 headers_to_use = headers or (
@@ -1047,7 +1080,10 @@ class DomruApiClient:
 
                     # Handle 401 - try to refresh token and retry
                     if response.status == self.HTTP_UNAUTHORIZED and authenticated:
-                        await self._set_access_token()
+                        await self._async_refresh_after_unauthorized(
+                            token_refreshed=token_refreshed
+                        )
+                        token_refreshed = True
                         continue  # Retry the request with new token
 
                     json_response = await self._parse_response(

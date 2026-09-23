@@ -14,7 +14,7 @@ from contextlib import suppress
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
+from homeassistant.const import Platform
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -34,9 +34,6 @@ from .api import (
     DomruApiClientError,
 )
 from .const import (
-    CONF_ACCESS_TOKEN,
-    CONF_OPERATOR_ID,
-    CONF_REFRESH_TOKEN,
     CONF_SIP_ENABLED,
     CONF_SIP_HOST_IP,
     CONF_SIP_LOCAL_IP,
@@ -52,6 +49,7 @@ from .const import (
 from .coordinator import DomruDataUpdateCoordinator
 from .data import DomruData
 from .door import async_open_door
+from .entry_setup import async_create_client_and_load_data
 from .fcm import DomruFcmListener
 from .media import async_setup_camera_audio
 from .sip import DomruSipClient, SipAccount
@@ -77,22 +75,12 @@ async def async_setup_entry(
     entry: DomruConfigEntry,
 ) -> bool:
     """Set up this integration using UI."""
-    client = DomruApiClient(
-        username=entry.data.get(CONF_USERNAME),
-        password=entry.data.get(CONF_PASSWORD),
-        session=async_get_clientsession(hass),
-        access_token=(
-            entry.data.get(CONF_ACCESS_TOKEN) or entry.data.get(CONF_REFRESH_TOKEN)
-        ),
-        refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
-        operator_id=entry.data.get(CONF_OPERATOR_ID),
+    # Authenticate and load IDs/FCM targets with HA-native retry and reauth errors.
+    client, initial_data = await async_create_client_and_load_data(
+        hass,
+        entry,
+        async_get_clientsession(hass),
     )
-
-    # Authenticate first
-    await client.async_authenticate()
-
-    # Load initial data to set IDs and all FCM access-control targets.
-    initial_data = await client.async_get_data()
 
     # Enable Home Assistant's optional WebRTC provider before camera entities load.
     await async_setup_camera_audio(hass)

@@ -42,7 +42,7 @@ class ConfigFlowCompatibilityTests(unittest.TestCase):
         self.assertIn("CONF_SIP_MODE, DEFAULT_SIP_MODE", setup)
 
     def test_setup_reuses_access_token_for_existing_phone_entries(self) -> None:
-        source = Path("custom_components/domru/__init__.py").read_text()
+        source = Path("custom_components/domru/entry_setup.py").read_text()
 
         self.assertIn("entry.data.get(CONF_ACCESS_TOKEN)", source)
         self.assertIn("or entry.data.get(CONF_REFRESH_TOKEN)", source)
