@@ -149,7 +149,7 @@ aiohttp_client.async_create_clientsession = lambda _hass: object()
 sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
 
 slugify_module = types.ModuleType("slugify")
-slugify_module.slugify = lambda value: str(value)
+slugify_module.slugify = str
 sys.modules["slugify"] = slugify_module
 
 
