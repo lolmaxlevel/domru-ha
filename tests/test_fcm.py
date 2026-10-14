@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001,ANN002,ANN003,ANN201,ANN205,ANN206,D102,D106,D107,N802,PT009,RUF012,SLF001
+# ruff: noqa: ANN001,ANN002,ANN003,ANN201,ANN205,ANN206,D102,D106,D107,N802,PT009,PT027,RUF012,SLF001
 """Tests for FCM doorbell notification helpers."""
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _install_homeassistant_stubs() -> None:
@@ -163,12 +164,15 @@ class FakeSuccessFirebaseMessaging:
             pass
 
     class FcmPushClientConfig:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self.abort_on_sequential_error_count = kwargs.get(
+                "abort_on_sequential_error_count", 3
+            )
 
     @classmethod
     def FcmPushClient(cls, *_args, **_kwargs):
         cls.client = FakeSuccessClient()
+        cls.client.config = _kwargs.get("config")
         return cls.client
 
 
@@ -240,6 +244,48 @@ class FakeSlowFirebaseMessaging:
 
 class FcmPayloadTests(unittest.TestCase):
     """FCM payload parsing behavior."""
+
+    def setUp(self) -> None:
+        # Lifecycle tests use constructor factories, rather than socket clients.
+        client_class = patch.object(
+            fcm_module,
+            "_fcm_client_class",
+            lambda module: module.FcmPushClient,
+        )
+        client_class.start()
+        self.addCleanup(client_class.stop)
+
+    def test_fcm_start_bounds_consecutive_connection_errors(self) -> None:
+        sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+        listener = DomruFcmListener(FakeHass(), FakeEntry(), FakeApi(), "install-1")
+        try:
+            asyncio.run(listener.async_start())
+        finally:
+            sys.modules.pop("firebase_messaging", None)
+
+        limit = listener._client.config.abort_on_sequential_error_count
+        self.assertIsInstance(limit, int)
+        self.assertGreater(limit, 0)
+
+    def test_watchdog_replaces_failed_client_and_registers_token(self) -> None:
+        async def run() -> None:
+            sys.modules["firebase_messaging"] = FakeSuccessFirebaseMessaging
+            api = FakeApi()
+            listener = DomruFcmListener(FakeHass(), FakeEntry(), api, "install-1")
+            try:
+                await listener.async_start()
+                old_client = listener._client
+                old_client.started = False
+                await listener._async_watchdog()
+                self.assertTrue(old_client.stopped)
+                self.assertIsNot(listener._client, old_client)
+                self.assertTrue(listener._client.started)
+                self.assertEqual(len(api.registered_tokens), 2)
+                await listener.async_stop()
+            finally:
+                sys.modules.pop("firebase_messaging", None)
+
+        asyncio.run(run())
 
     def test_incoming_call_push_maps_to_ring_event(self) -> None:
         event = fcm_event_from_notification(
@@ -434,6 +480,96 @@ class FcmPayloadTests(unittest.TestCase):
         self.assertTrue(client.started)
         self.assertTrue(client.stopped)
         self.assertIsNone(listener._client)
+
+
+class SocketClient:
+    """Socket boundary with the reset lock exposed by firebase-messaging."""
+
+    def __init__(self) -> None:
+        self.reset_lock = asyncio.Lock()
+        self.do_listen = True
+        self.reader = asyncio.StreamReader()
+
+    async def _receive_msg(self) -> bytes:
+        return await self.reader.readexactly(1)
+
+
+class FcmReconnectTests(unittest.IsolatedAsyncioTestCase):
+    """Receive-side behavior while another task reconnects the socket."""
+
+    def make_client(self):
+        module = types.SimpleNamespace(FcmPushClient=SocketClient)
+        return fcm_module._fcm_client_class(module)()
+
+    async def test_pending_healthy_read_does_not_hold_reset_lock(self):
+        client = self.make_client()
+        receiver = asyncio.create_task(client._receive_msg())
+        try:
+            await asyncio.sleep(0)
+            async with asyncio.timeout(1):
+                async with client.reset_lock:
+                    client.reader.feed_data(b"n")
+            self.assertEqual(await asyncio.wait_for(receiver, 1), b"n")
+        finally:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+
+    async def test_failed_socket_waits_for_reset_and_receives_on_new_socket(self):
+        client = self.make_client()
+        client.reader.set_exception(ConnectionResetError("network lost"))
+        await client.reset_lock.acquire()
+        receiver = asyncio.create_task(client._receive_msg())
+        heartbeat = []
+        asyncio.get_running_loop().call_soon(heartbeat.append, "tick")
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertEqual(heartbeat, ["tick"])
+            self.assertFalse(receiver.done(), "receiver read the failed socket")
+            client.reader = asyncio.StreamReader()
+            client.reader.feed_data(b"n")
+            client.reset_lock.release()
+            self.assertEqual(await asyncio.wait_for(receiver, 1), b"n")
+        finally:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+            if client.reset_lock.locked():
+                client.reset_lock.release()
+
+    async def test_stop_cancels_receiver_waiting_for_reset(self):
+        client = self.make_client()
+        client.reader.set_exception(ConnectionResetError("network lost"))
+        await client.reset_lock.acquire()
+        receiver = asyncio.create_task(client._receive_msg())
+        try:
+            await asyncio.sleep(0)
+            receiver.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await receiver
+        finally:
+            await asyncio.gather(receiver, return_exceptions=True)
+            client.reset_lock.release()
+
+    async def test_exhausted_reset_does_not_read_failed_socket(self):
+        client = self.make_client()
+        client.reader.set_exception(ConnectionResetError("network lost"))
+        await client.reset_lock.acquire()
+        receiver = asyncio.create_task(client._receive_msg())
+        try:
+            await asyncio.sleep(0)
+            client.do_listen = False
+            client.reset_lock.release()
+            self.assertIsNone(await receiver)
+        finally:
+            await asyncio.gather(receiver, return_exceptions=True)
+
+    async def test_network_error_outside_reset_reaches_upstream_handler(self):
+        client = self.make_client()
+        error = ConnectionResetError("network lost")
+        client.reader.set_exception(error)
+        with self.assertRaises(ConnectionResetError) as raised:
+            await client._receive_msg()
+        self.assertIs(raised.exception, error)
 
 
 if __name__ == "__main__":

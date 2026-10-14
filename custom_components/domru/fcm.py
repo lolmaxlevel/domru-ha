@@ -54,6 +54,30 @@ _PUSH_TYPE_END_REASON = {
 }
 
 
+def _fcm_client_class(firebase_messaging: Any) -> type:
+    """Adapt the released FCM client to wait for concurrent connection resets."""
+
+    class ReconnectingFcmPushClient(firebase_messaging.FcmPushClient):
+        """Prevent reads from a failed socket while the monitor reconnects it."""
+
+        async def _receive_msg(self) -> Any:
+            # firebase-messaging 0.4.5's listen loop waits for RESETTING, but
+            # _connect_with_retry changes that state to STARTING_CONNECTION.
+            # The reset lock spans the entire reconnect and login attempt.
+            # Waiting here avoids repeatedly reading the old failed socket.
+            # Upstream fix (not yet released):
+            # https://github.com/sdb9696/firebase-messaging/pull/36
+            reset_lock = self.reset_lock
+            if reset_lock is not None and reset_lock.locked():
+                async with reset_lock:
+                    pass
+            if not self.do_listen:
+                return None
+            return await super()._receive_msg()
+
+    return ReconnectingFcmPushClient
+
+
 def fcm_event_from_notification(notification: dict[str, Any]) -> dict[str, Any] | None:
     """Return a normalized doorbell event from an FCM data notification."""
     data = (notification or {}).get("data") or {}
@@ -162,13 +186,13 @@ class DomruFcmListener:
                 messaging_sender_id=FCM_SENDER_ID,
                 bundle_id=FCM_BUNDLE_ID,
             )
-            client = firebase_messaging.FcmPushClient(
+            client = _fcm_client_class(firebase_messaging)(
                 self._on_notification,
                 register_config,
                 credentials,
                 self._on_credentials_updated,
                 config=firebase_messaging.FcmPushClientConfig(
-                    abort_on_sequential_error_count=None
+                    abort_on_sequential_error_count=3
                 ),
             )
             if client is None:
